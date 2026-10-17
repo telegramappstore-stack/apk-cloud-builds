@@ -1,4 +1,5 @@
 [app]
+p4a.branch = v2024.01.21
 title = Proxy Checker
 package.name = proxychecker
 package.domain = org.proxy
