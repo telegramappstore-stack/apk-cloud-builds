@@ -1,18 +1,20 @@
 [app]
 p4a.branch = v2024.01.21
-title = Proxy Checker
-package.name = proxychecker
-package.domain = org.proxy
+android.ndk = 25b
+title = Proxy 3128
+package.name = proxy3128
+package.domain = org.proxyapp
 source.dir = .
-source.include_exts = py
+source.include_exts = py,png,jpg,kv
 version = 1.0
-requirements = python3,kivy==2.3.0,requests,urllib3,chardet,idna,certifi,charset-normalizer,beautifulsoup4,soupsieve,typing_extensions
+requirements = python3,kivy==2.3.0,requests,urllib3,idna,charset-normalizer,certifi
 orientation = portrait
 fullscreen = 0
+
 android.permissions = INTERNET
 android.api = 33
 android.minapi = 24
-android.archs = arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a
 android.accept_sdk_license = True
 
 [buildozer]
