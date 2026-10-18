@@ -44,6 +44,43 @@ jobs:
           source /tmp/annot.sh
           grep -q accept_sdk_license buildozer.spec || sed -i '/^\[app\]/a android.accept_sdk_license = True' buildozer.spec
           run_logged 'yes | buildozer -v android debug'
+      - name: Check APK contents
+        continue-on-error: true
+        run: |
+          cat > /tmp/verify.py <<'EOS'
+          import glob, io, os, tarfile, zipfile
+          try:
+              need = []
+              if os.path.exists(".cloud_builder_imports.txt"):
+                  need = [l.strip() for l in open(".cloud_builder_imports.txt") if l.strip()]
+              apk = sorted(glob.glob("bin/*.apk"))[-1]
+              z = zipfile.ZipFile(apk)
+              names = []
+              for n in z.namelist():
+                  if n.startswith("assets/") and "private" in n:
+                      try:
+                          t = tarfile.open(fileobj=io.BytesIO(z.read(n)), mode="r:*")
+                          names += t.getnames()
+                      except Exception as e:
+                          print("could not read", n, e)
+              print("APK:", apk, "| files in python bundle:", len(names))
+              if len(names) < 100:
+                  print("python bundle not readable - module check skipped")
+              else:
+                  low = ["/" + x.lower() for x in names]
+                  missing = []
+                  for m in need:
+                      key = "/" + m.lower()
+                      if not any((key + "/") in s or (key + ".") in s for s in low):
+                          missing.append(m)
+                  if missing:
+                      print("::warning title=APK_CHECK::APK_MISSING_MODULES: " + ",".join(missing))
+                  else:
+                      print("module check OK:", ", ".join(need) or "(nothing to check)")
+          except Exception as e:
+              print("check skipped:", e)
+          EOS
+          python /tmp/verify.py
       - name: Save APK as artifact
         uses: actions/upload-artifact@v4
         with:
