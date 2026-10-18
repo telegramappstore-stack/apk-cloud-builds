@@ -1,294 +1,139 @@
-"""Proxy Checker (Android / Kivy) - fetch port-3128 proxies from freeproxy.world, test them."""
-import queue
-import re
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# ---- APK Cloud Builder crash guard (generated) ----
+# Shows errors on the phone screen instead of closing silently. Safe to delete.
+import os
+import sys
+import traceback
 
-import requests
-from bs4 import BeautifulSoup
-from kivy.app import App
-from kivy.clock import Clock
-from kivy.core.clipboard import Clipboard
-from kivy.core.window import Window
-from kivy.lang import Builder
-from kivy.utils import get_color_from_hex
-
-BASE, PORT = "https://www.freeproxy.world/", "3128"
-TEST_URL = "https://www.gstatic.com/generate_204"
-UA = {"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36"}
-IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
-
-KV = """
-#:import hex kivy.utils.get_color_from_hex
-<Pill@Button>:
-    background_normal: ''
-    background_down: ''
-    background_color: 0, 0, 0, 0
-    color: 1, 1, 1, 1
-    bold: True
-    font_size: '15sp'
-    bg: hex('#4F46E5')
-    canvas.before:
-        Color:
-            rgba: self.bg if self.state == 'normal' else [c * 0.8 for c in self.bg]
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(14)]
-
-<Stat@BoxLayout>:
-    title: ''
-    value: '0'
-    tint: hex('#4F46E5')
-    orientation: 'vertical'
-    padding: dp(6)
-    canvas.before:
-        Color:
-            rgba: 1, 1, 1, 1
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(14)]
-    Label:
-        text: root.value
-        color: root.tint
-        bold: True
-        font_size: '24sp'
-    Label:
-        text: root.title
-        color: hex('#6B7280')
-        font_size: '12sp'
-
-BoxLayout:
-    orientation: 'vertical'
-    padding: dp(16)
-    spacing: dp(10)
-    Label:
-        text: 'Proxy Checker'
-        color: hex('#1F2937')
-        bold: True
-        font_size: '26sp'
-        size_hint_y: None
-        height: dp(44)
-        halign: 'left'
-        text_size: self.size
-    Label:
-        text: 'freeproxy.world  ·  port 3128'
-        color: hex('#6B7280')
-        font_size: '13sp'
-        size_hint_y: None
-        height: dp(18)
-        halign: 'left'
-        text_size: self.size
-    BoxLayout:
-        size_hint_y: None
-        height: dp(76)
-        spacing: dp(8)
-        Stat:
-            id: s_found
-            title: 'Found'
-        Stat:
-            id: s_tested
-            title: 'Tested'
-            tint: hex('#D97706')
-        Stat:
-            id: s_ok
-            title: 'Working'
-            tint: hex('#16A34A')
-    ProgressBar:
-        id: bar
-        max: 1
-        size_hint_y: None
-        height: dp(8)
-    Label:
-        id: status
-        text: 'Ready.'
-        color: hex('#6B7280')
-        font_size: '12sp'
-        size_hint_y: None
-        height: dp(34)
-        halign: 'left'
-        valign: 'middle'
-        text_size: self.size
-    BoxLayout:
-        size_hint_y: None
-        height: dp(50)
-        spacing: dp(8)
-        Pill:
-            id: go
-            text: 'Fetch & Test'
-            on_release: app.start()
-        Pill:
-            text: 'Stop'
-            bg: hex('#DC2626')
-            on_release: app.stop_run()
-    BoxLayout:
-        size_hint_y: None
-        height: dp(50)
-        spacing: dp(8)
-        Pill:
-            text: 'Copy fastest'
-            bg: hex('#16A34A')
-            on_release: app.copy_best()
-        Pill:
-            text: 'Wi-Fi settings'
-            bg: hex('#374151')
-            on_release: app.open_wifi()
-    Label:
-        text: 'Tap a working proxy to copy it'
-        color: hex('#6B7280')
-        font_size: '12sp'
-        size_hint_y: None
-        height: dp(20)
-    ScrollView:
-        GridLayout:
-            id: lst
-            cols: 1
-            size_hint_y: None
-            height: self.minimum_height
-            spacing: dp(6)
-"""
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REAL = os.path.join(_HERE, "real_main.py")
+_shown = []
 
 
-def fetch_page(session, page):
-    params = {"type": "", "anonymity": "", "country": "", "speed": "", "port": PORT, "page": page}
-    r = session.get(BASE, params=params, timeout=20)
-    r.raise_for_status()
-    rows = []
-    for tr in BeautifulSoup(r.text, "html.parser").select("table tr"):
-        td = [t.get_text(" ", strip=True) for t in tr.find_all("td")]
-        if len(td) >= 6 and IP_RE.match(td[0]) and td[1] == PORT:
-            rows.append((td[0], td[1], td[2]))
-    return rows
-
-
-def test_proxy(ip, port, timeout=8):
-    p = f"http://{ip}:{port}"
-    t = time.perf_counter()
+def _save(text):
     try:
-        r = requests.get(TEST_URL, proxies={"http": p, "https": p}, headers=UA,
-                         timeout=timeout, allow_redirects=False)
-        return r.status_code in (200, 204), int((time.perf_counter() - t) * 1000)
-    except Exception:
-        return False, None
-
-
-class ProxyApp(App):
-    title = "Proxy Checker"
-
-    def build(self):
-        Window.clearcolor = get_color_from_hex("#F4F6FB")
-        self.q, self.stop, self.running = queue.Queue(), threading.Event(), False
-        self.c = {"found": 0, "tested": 0, "ok": 0}
-        self.speeds = {}
-        self.ui = Builder.load_string(KV)
-        Clock.schedule_interval(self.poll, 0.2)
-        return self.ui
-
-    # ---- actions
-    def start(self):
-        if self.running:
-            return
-        self.ui.ids.lst.clear_widgets()
-        self.c = dict.fromkeys(self.c, 0)
-        self.speeds.clear()
-        self.ui.ids.bar.value = 0
-        self.stop.clear()
-        self.running = True
-        threading.Thread(target=self.worker, daemon=True).start()
-
-    def stop_run(self):
-        self.stop.set()
-        self.say("Stopping…")
-
-    def say(self, t):
-        self.ui.ids.status.text = t
-
-    def copy_best(self):
-        if not self.speeds:
-            return self.say("No working proxy yet.")
-        best = min(self.speeds, key=self.speeds.get)
-        Clipboard.copy(best)
-        self.say(f"Copied {best}. Wi-Fi settings > your network > Proxy > Manual.")
-
-    def open_wifi(self):
         try:
-            from jnius import autoclass
-            Intent = autoclass("android.content.Intent")
-            Settings = autoclass("android.provider.Settings")
-            act = autoclass("org.kivy.android.PythonActivity").mActivity
-            act.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+            from android.storage import app_storage_path
+            base = app_storage_path()
         except Exception:
-            self.say("Open Settings > Wi-Fi manually.")
+            base = _HERE
+        with open(os.path.join(base, "crash_log.txt"), "a", encoding="utf-8") as f:
+            f.write(text + "\n" + "-" * 40 + "\n")
+    except Exception:
+        pass
 
-    # ---- background
-    def worker(self):
-        try:
-            session, seen, items = requests.Session(), set(), []
-            session.headers.update(UA)
-            pages = 3
-            for p in range(1, pages + 1):
-                if self.stop.is_set():
-                    break
-                self.q.put(("s", f"Fetching page {p}/{pages}…"))
-                try:
-                    rows = fetch_page(session, p)
-                except Exception as e:
-                    self.q.put(("s", f"Fetch failed: {e}"))
-                    break
-                if not rows:
-                    break
-                for ip, port, country in rows:
-                    if (ip, port) not in seen:
-                        seen.add((ip, port))
-                        items.append((ip, port, country))
-                        self.q.put(("add",))
-            if items and not self.stop.is_set():
-                self.q.put(("s", f"Testing {len(items)} proxies…"))
-                with ThreadPoolExecutor(max_workers=40) as ex:
-                    futs = {ex.submit(self.guard, ip, port): (ip, port, c) for ip, port, c in items}
-                    for f in as_completed(futs):
-                        r = f.result()
-                        if r is not None:
-                            ip, port, c = futs[f]
-                            self.q.put(("res", f"{ip}:{port}", c, r[0], r[1], len(items)))
-                    ex.shutdown(cancel_futures=True)
-        finally:
-            self.q.put(("done",))
 
-    def guard(self, ip, port):
-        return None if self.stop.is_set() else test_proxy(ip, port)
+def _view(text):
+    from kivy.graphics import Color, Rectangle
+    from kivy.metrics import dp, sp
+    from kivy.uix.boxlayout import BoxLayout
+    from kivy.uix.button import Button
+    from kivy.uix.label import Label
+    from kivy.uix.scrollview import ScrollView
+    from kivy.core.clipboard import Clipboard
+    root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+    with root.canvas.before:
+        Color(1, 1, 1, 1)
+        rect = Rectangle(pos=root.pos, size=root.size)
+    root.bind(pos=lambda w, v: setattr(rect, "pos", v), size=lambda w, v: setattr(rect, "size", v))
+    root.add_widget(Label(text="The app hit an error (send a screenshot of this page)", bold=True,
+                          size_hint_y=None, height=dp(44), font_size=sp(15), color=(0.8, 0.1, 0.1, 1)))
+    sv = ScrollView()
+    body = Label(text=text[-6000:], size_hint_y=None, color=(0.1, 0.1, 0.1, 1), font_size=sp(11),
+                 halign="left", valign="top")
+    body.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+    body.bind(texture_size=lambda w, s: setattr(w, "height", s[1]))
+    sv.add_widget(body)
+    root.add_widget(sv)
+    row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+    cp = Button(text="Copy error")
+    cp.bind(on_release=lambda *a: Clipboard.copy(text))
+    row.add_widget(cp)
+    root.add_widget(row)
+    return root, row
 
-    # ---- UI updates
-    def poll(self, dt):
-        from kivy.factory import Factory
-        for _ in range(100):
+
+def _popup(text):
+    try:
+        from kivy.uix.button import Button
+        from kivy.uix.popup import Popup
+        root, row = _view(text)
+        pop = Popup(title="Error (the app keeps running)", content=root, size_hint=(0.96, 0.92))
+        close = Button(text="Close")
+        close.bind(on_release=pop.dismiss)
+        row.add_widget(close)
+        pop.open()
+    except Exception:
+        traceback.print_exc()
+
+
+def _fallback(text):
+    try:
+        from kivy.app import App
+        from kivy.core.window import Window
+        from kivy.uix.button import Button
+        Window.clearcolor = (1, 1, 1, 1)
+
+        class ErrorApp(App):
+            def build(self):
+                root, row = _view(text)
+                close = Button(text="Close")
+                close.bind(on_release=lambda *a: self.stop())
+                row.add_widget(close)
+                return root
+        ErrorApp().run()
+    except Exception:
+        traceback.print_exc()
+
+
+def _install_handler():
+    try:
+        from kivy.base import ExceptionHandler, ExceptionManager
+        from kivy.clock import Clock
+
+        class Guard(ExceptionHandler):
+            def handle_exception(self, inst):
+                if isinstance(inst, (SystemExit, KeyboardInterrupt)):
+                    return ExceptionManager.RAISE
+                text = "".join(traceback.format_exception(type(inst), inst, inst.__traceback__))
+                _save(text)
+                if len(_shown) < 3:
+                    _shown.append(text)
+                    Clock.schedule_once(lambda dt, t=text: _popup(t), 0)
+                return ExceptionManager.PASS
+        ExceptionManager.add_handler(Guard())
+    except Exception:
+        pass
+
+
+def _find_real():
+    # python-for-android byte-compiles the app and (by default) ships only .pyc files,
+    # so "real_main.py" may exist in the APK as "real_main.pyc". Accept both.
+    base = os.path.splitext(_REAL)[0]
+    for ext in (".py", ".pyc", ".pyo"):
+        if os.path.exists(base + ext):
+            return base + ext
+    return None
+
+
+def _main():
+    _install_handler()
+    try:
+        import runpy
+        target = _find_real()
+        if target is None:
             try:
-                m = self.q.get_nowait()
-            except queue.Empty:
-                break
-            if m[0] == "s":
-                self.say(m[1])
-            elif m[0] == "add":
-                self.c["found"] += 1
-            elif m[0] == "res":
-                _, key, country, ok, ms, total = m
-                self.c["tested"] += 1
-                self.ui.ids.bar.value = self.c["tested"] / max(total, 1)
-                if ok:
-                    self.c["ok"] += 1
-                    self.speeds[key] = ms
-                    b = Factory.Pill(text=f"{key}   ·   {ms} ms   ·   {country}",
-                                     size_hint_y=None, height=48, bg=get_color_from_hex("#16A34A"))
-                    b.bind(on_release=lambda w, k=key: (Clipboard.copy(k), self.say(f"Copied {k}")))
-                    self.ui.ids.lst.add_widget(b, index=len(self.ui.ids.lst.children))
-            elif m[0] == "done":
-                self.running = False
-                self.say(f"Finished · {self.c['ok']} working of {self.c['found']}")
-        i = self.ui.ids
-        i.s_found.value, i.s_tested.value, i.s_ok.value = (str(self.c[k]) for k in ("found", "tested", "ok"))
+                seen = ", ".join(sorted(os.listdir(_HERE))[:60])
+            except Exception:
+                seen = "?"
+            raise FileNotFoundError("real_main.py (or its compiled .pyc) is missing from the APK. "
+                                    "Files next to main: " + seen)
+        if _HERE not in sys.path:
+            sys.path.insert(0, _HERE)
+        runpy.run_path(target, run_name="__main__")
+    except Exception:
+        text = traceback.format_exc()
+        _save(text)
+        _fallback(text)
 
 
-if __name__ == "__main__":
-    ProxyApp().run()
+_main()
