@@ -70,18 +70,16 @@ class AndroidEngine(BaseEngine):
         self._gen = 0
 
     # -------------------------------------------------------------- service plumbing
-    def _intent(self, action, cfg=None):
+    def _intent(self, action):
         i = self.Intent()
         i.setClassName(self.act.getPackageName(), SERVICE_CLASS)
         i.setAction(action)
-        if cfg:
-            i.putExtra("xray_config", cfg)
-            i.putExtra("socks_port", str(xc.LOCAL_PORT))        # strings only: avoids putExtra overload ambiguity
         return i
 
-    def _start_service(self, cfg):
+    def _start_service(self):
+        """The service reads <filesDir>/xray.json (written just before); nothing is passed through extras."""
         self.Svc.markStarting()
-        i = self._intent(ACTION_START, cfg)
+        i = self._intent(ACTION_START)
         if self.sdk >= 26:
             self.act.startForegroundService(i)
         else:
@@ -153,7 +151,7 @@ class AndroidEngine(BaseEngine):
                 return self._fail(str(e))
             with open(cfg_path, "w", encoding="utf-8") as f:
                 f.write(text)
-            self._start_service(cfg_path)
+            self._start_service()
             st = self._wait(("running", "error"), 30)
             if self._cancel or gen != self._gen:
                 return
