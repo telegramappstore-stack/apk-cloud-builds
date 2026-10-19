@@ -174,8 +174,8 @@ def outbound(p, legacy=False):
     return ob
 
 
-def build_config(p, legacy=False, local_port=LOCAL_PORT, log_level="warning"):
-    return {
+def build_config(p, legacy=False, local_port=LOCAL_PORT, log_level="warning", http_port=None):
+    cfg = {
         "log": {"loglevel": log_level},
         "inbounds": [{"tag": "socks-in", "listen": "127.0.0.1", "port": local_port, "protocol": "socks",
                       "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"}}],
@@ -183,6 +183,32 @@ def build_config(p, legacy=False, local_port=LOCAL_PORT, log_level="warning"):
                       {"tag": "block", "protocol": "blackhole"}],
         "routing": {"domainStrategy": "AsIs", "rules": []},
     }
+    if http_port:                                   # local HTTP proxy too (Psiphon's upstream proxy wants HTTP)
+        cfg["inbounds"].append({"tag": "http-in", "listen": "127.0.0.1", "port": http_port, "protocol": "http",
+                                "settings": {}})
+    return cfg
+
+
+def build_test_config(proxies, base_port, legacy=False):
+    """ONE Xray process that tests many servers: proxy j gets its own local SOCKS port base_port+j.
+    Returns (config, ports) where ports[j] is the port for proxies[j], or None if it cannot be expressed."""
+    inbounds, outbounds, rules, ports = [], [], [], []
+    for p in proxies:
+        try:
+            ob = outbound(p, legacy)
+        except ConfigError:
+            ports.append(None)
+            continue
+        i = len(inbounds)
+        ob["tag"] = "o%d" % i
+        inbounds.append({"tag": "i%d" % i, "listen": "127.0.0.1", "port": base_port + i, "protocol": "socks",
+                         "settings": {"auth": "noauth", "udp": False}})
+        outbounds.append(ob)
+        rules.append({"type": "field", "inboundTag": ["i%d" % i], "outboundTag": "o%d" % i})
+        ports.append(base_port + i)
+    outbounds += [{"tag": "direct", "protocol": "freedom"}, {"tag": "block", "protocol": "blackhole"}]
+    return {"log": {"loglevel": "warning"}, "inbounds": inbounds, "outbounds": outbounds,
+            "routing": {"domainStrategy": "AsIs", "rules": rules}}, ports
 
 
 def dumps(p, legacy=False, **kw):
