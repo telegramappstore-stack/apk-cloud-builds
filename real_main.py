@@ -1,5 +1,6 @@
-"""ProxyScout - finds proxies / V2Ray configs, verifies them for real, and connects through them as a VPN
+"""Amizoo - finds proxies / V2Ray configs, verifies them for real, and connects through them as a VPN
 (Android VpnService + bundled Xray core). On a PC it runs with a simulated connection."""
+import json
 import os
 import threading
 import time
@@ -12,12 +13,13 @@ from kivy.graphics import Color, Ellipse, Line, RoundedRectangle
 from kivy.lang import Builder
 from kivy.metrics import dp
 from kivy.properties import BooleanProperty, ListProperty, NumericProperty, StringProperty
-from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.behaviors import ButtonBehavior
+from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
 from kivy.uix.screenmanager import Screen
+from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.utils import platform
 
@@ -29,13 +31,19 @@ MAX_TEST = 400           # servers tested per scan
 V2_VERIFY_MAX = 120      # V2Ray configs verified with the Xray core per scan
 MAX_SHOWN = 80
 HIST = 60                # seconds in the speed graph
-GREEN, AMBER, ORANGE = [0.25, 0.85, 0.55, 1], [0.98, 0.78, 0.30, 1], [0.98, 0.55, 0.30, 1]
-RED, GREY, BLUE = [0.95, 0.35, 0.40, 1], [0.50, 0.55, 0.68, 1], [0.30, 0.55, 1.0, 1]
-SURF, SURF2 = [0.085, 0.11, 0.18, 1], [0.14, 0.17, 0.27, 1]
+BG = (0.955, 0.965, 0.985, 1)
+GREEN, AMBER, RED = [0.10, 0.68, 0.42, 1], [0.93, 0.62, 0.05, 1], [0.90, 0.25, 0.30, 1]
+GREY, BLUE, BLUE_DN = [0.55, 0.60, 0.72, 1], [0.13, 0.45, 0.96, 1], [0.09, 0.36, 0.82, 1]
+SURF2, LINE = [0.91, 0.93, 0.98, 1], [0.87, 0.90, 0.95, 1]
 
 KV = r"""
 #:import dp kivy.metrics.dp
 #:import sp kivy.metrics.sp
+#:set BG (0.955, 0.965, 0.985, 1)
+#:set SURF (1, 1, 1, 1)
+#:set TXT (0.09, 0.12, 0.22, 1)
+#:set MUTED (0.42, 0.47, 0.60, 1)
+#:set ACC (0.13, 0.45, 0.96, 1)
 
 <LeftLabel@Label>:
     text_size: self.width, None
@@ -56,13 +64,18 @@ KV = r"""
             pos: self.pos
             size: self.size
             radius: self.radius
+        Color:
+            rgba: 0.87, 0.90, 0.95, 1
+        Line:
+            rounded_rectangle: self.x, self.y, self.width, self.height, self.radius[0]
+            width: 1
 
 <PillButton>:
     background_normal: ''
     background_down: ''
     background_color: 0, 0, 0, 0
     bold: True
-    color: 1, 1, 1, 1
+    color: self.fg
     font_size: sp(14)
     canvas.before:
         Color:
@@ -91,10 +104,10 @@ KV = r"""
     bold: True
     font_size: sp(13)
     allow_no_selection: False
-    color: (1, 1, 1, 1) if self.state == 'down' else (0.55, 0.60, 0.72, 1)
+    color: (1, 1, 1, 1) if self.state == 'down' else (0.42, 0.47, 0.60, 1)
     canvas.before:
         Color:
-            rgba: (0.30, 0.55, 1, 1) if self.state == 'down' else (0.085, 0.11, 0.18, 1)
+            rgba: (0.13, 0.45, 0.96, 1) if self.state == 'down' else (0.91, 0.93, 0.98, 1)
         RoundedRectangle:
             pos: self.pos
             size: self.size
@@ -110,25 +123,31 @@ KV = r"""
     Label:
         text: root.caption
         font_size: sp(11)
-        color: 0.55, 0.60, 0.72, 1
+        color: MUTED
 
 <ServerRow>:
     size_hint_y: None
     height: dp(66)
     padding: dp(16), dp(8), dp(12), dp(8)
     spacing: dp(10)
-    bg: (0.14, 0.17, 0.27, 1) if self.state == 'down' else (0.085, 0.11, 0.18, 1)
+    bg: (0.93, 0.95, 1, 1) if self.state == 'down' else (1, 1, 1, 1)
+    Image:
+        source: root.flag
+        size_hint: None, None
+        size: dp(30), dp(21)
+        pos_hint: {'center_y': .5}
+        opacity: 1 if root.flag else 0
     BoxLayout:
         orientation: 'vertical'
         LeftLabel:
             text: root.title
             font_size: sp(16)
             bold: True
-            color: 1, 1, 1, 1
+            color: TXT
         LeftLabel:
             text: root.subtitle
             font_size: sp(12)
-            color: 0.55, 0.60, 0.72, 1
+            color: MUTED
     Pill:
         size_hint: None, None
         size: dp(80), dp(30)
@@ -146,26 +165,25 @@ KV = r"""
             size_hint_y: None
             height: dp(40)
             spacing: dp(10)
-            PillButton:
+            GhostButton:
                 size_hint_x: None
                 width: dp(80)
                 text: 'Back'
-                bg: 0.14, 0.17, 0.27, 1
-                bg_down: 0.20, 0.24, 0.36, 1
                 on_release: app.back_home()
             LeftLabel:
                 text: root.title_text
                 font_size: sp(15)
                 bold: True
-                color: 1, 1, 1, 1
+                color: TXT
         FloatLayout:
             size_hint_y: None
-            height: dp(190)
+            height: dp(176)
             PowerButton:
                 size_hint: None, None
-                size: dp(156), dp(156)
+                size: dp(150), dp(150)
                 pos_hint: {'center_x': .5, 'center_y': .5}
                 color: root.ring
+                busy: root.busy
                 on_release: app.toggle_connection()
         Label:
             size_hint_y: None
@@ -181,46 +199,45 @@ KV = r"""
             Stat:
                 value: root.down_text
                 caption: 'Download'
-                accent: 0.25, 0.78, 0.95, 1
+                accent: 0.13, 0.45, 0.96, 1
             Stat:
                 value: root.up_text
                 caption: 'Upload'
-                accent: 0.70, 0.50, 1, 1
+                accent: 0.55, 0.35, 0.90, 1
             Stat:
                 value: root.ping_text
                 caption: 'Ping via tunnel'
-                accent: 0.25, 0.85, 0.55, 1
+                accent: 0.10, 0.68, 0.42, 1
         SpeedGraph:
             size_hint_y: None
-            height: dp(84)
+            height: dp(80)
             down: root.down_hist
             up: root.up_hist
         WrapLabel:
             text: root.detail_text
             font_size: sp(12)
-            color: 0.55, 0.60, 0.72, 1
+            color: MUTED
         WrapLabel:
             text: root.error_text
             font_size: sp(11)
-            color: 0.95, 0.45, 0.50, 1
+            color: 0.90, 0.25, 0.30, 1
         WrapLabel:
             text: root.local_text
             font_size: sp(12)
-            color: 0.45, 0.70, 1, 1
+            color: ACC
         Widget:
         BoxLayout:
             size_hint_y: None
             height: dp(46)
-            spacing: dp(10)
-            PillButton:
+            spacing: dp(8)
+            GhostButton:
                 text: root.local_btn
-                bg: 0.14, 0.17, 0.27, 1
-                bg_down: 0.20, 0.24, 0.36, 1
                 on_release: app.toggle_local()
-            PillButton:
-                text: 'Copy config'
-                bg: 0.14, 0.17, 0.27, 1
-                bg_down: 0.20, 0.24, 0.36, 1
+            GhostButton:
+                text: 'Telegram'
+                on_release: app.open_telegram_local()
+            GhostButton:
+                text: 'Copy'
                 on_release: app.copy_current()
 
 ScreenManager:
@@ -233,12 +250,21 @@ ScreenManager:
 
             BoxLayout:
                 size_hint_y: None
-                height: dp(46)
+                height: dp(44)
+                Image:
+                    source: app.logo
+                    size_hint: None, None
+                    size: dp(38), dp(38)
+                    pos_hint: {'center_y': .5}
+                    mipmap: True
+                Widget:
+                    size_hint_x: None
+                    width: dp(8)
                 LeftLabel:
-                    text: 'ProxyScout'
+                    text: 'Amizoo'
                     font_size: sp(26)
                     bold: True
-                    color: 1, 1, 1, 1
+                    color: TXT
                 PillButton:
                     size_hint: None, None
                     size: dp(104), dp(34)
@@ -246,9 +272,36 @@ ScreenManager:
                     text: 'VPN ON'
                     opacity: 1 if app.vpn_on else 0
                     disabled: not app.vpn_on
-                    bg: 0.16, 0.62, 0.40, 1
-                    bg_down: 0.12, 0.50, 0.32, 1
+                    bg: 0.10, 0.68, 0.42, 1
+                    bg_down: 0.07, 0.55, 0.34, 1
                     on_release: app.open_conn()
+
+            Card:
+                size_hint_y: None
+                height: dp(212)
+                orientation: 'vertical'
+                padding: dp(10), dp(12), dp(10), dp(8)
+                spacing: dp(4)
+                PowerButton:
+                    size_hint: None, None
+                    size: dp(128), dp(128)
+                    pos_hint: {'center_x': .5}
+                    color: app.hero_color
+                    busy: app.hero_busy
+                    on_release: app.quick_connect()
+                Label:
+                    size_hint_y: None
+                    height: dp(30)
+                    text: app.hero_text
+                    font_size: sp(18)
+                    bold: True
+                    color: TXT
+                Label:
+                    size_hint_y: None
+                    height: dp(20)
+                    text: app.hero_sub
+                    font_size: sp(12)
+                    color: MUTED
 
             BoxLayout:
                 size_hint_y: None
@@ -274,23 +327,23 @@ ScreenManager:
 
             LeftLabel:
                 size_hint_y: None
-                height: dp(22)
+                height: dp(20)
                 text: app.status_text
                 font_size: sp(12)
-                color: 0.55, 0.60, 0.72, 1
+                color: MUTED
 
             Widget:
                 size_hint_y: None
                 height: dp(4)
                 canvas:
                     Color:
-                        rgba: 0.085, 0.11, 0.18, 1
+                        rgba: 0.87, 0.90, 0.95, 1
                     RoundedRectangle:
                         pos: self.pos
                         size: self.size
                         radius: [dp(2)]
                     Color:
-                        rgba: 0.30, 0.55, 1, 1
+                        rgba: 0.13, 0.45, 0.96, 1
                     RoundedRectangle:
                         pos: self.pos
                         size: max(self.height, self.width * app.progress), self.height
@@ -313,16 +366,14 @@ ScreenManager:
                 PillButton:
                     font_size: sp(16)
                     text: 'Stop' if app.scanning else 'Find servers'
-                    bg: (0.92, 0.30, 0.36, 1) if app.scanning else (0.30, 0.55, 1, 1)
-                    bg_down: (0.75, 0.22, 0.28, 1) if app.scanning else (0.22, 0.43, 0.88, 1)
+                    bg: (0.90, 0.25, 0.30, 1) if app.scanning else (0.13, 0.45, 0.96, 1)
+                    bg_down: (0.75, 0.18, 0.24, 1) if app.scanning else (0.09, 0.36, 0.82, 1)
                     on_release: app.toggle_scan()
-                PillButton:
+                GhostButton:
                     size_hint_x: None
                     width: dp(60)
                     font_size: sp(18)
                     text: '...'
-                    bg: 0.14, 0.17, 0.27, 1
-                    bg_down: 0.20, 0.24, 0.36, 1
                     on_release: app.open_menu()
     ConnScreen:
         id: conn
@@ -343,19 +394,30 @@ def fmt_time(sec):
 
 
 class Card(BoxLayout):
-    bg = ListProperty(SURF)
-    radius = ListProperty([dp(16)])
+    bg = ListProperty([1, 1, 1, 1])
+    radius = ListProperty([dp(18)])
 
 
 class Stat(BoxLayout):
     value = StringProperty("0")
     caption = StringProperty("")
-    accent = ListProperty([1, 1, 1, 1])
+    accent = ListProperty([0.1, 0.1, 0.2, 1])
 
 
 class PillButton(Button):
     bg = ListProperty(BLUE)
-    bg_down = ListProperty([0.22, 0.43, 0.88, 1])
+    bg_down = ListProperty(BLUE_DN)
+    fg = ListProperty([1, 1, 1, 1])
+
+
+class GhostButton(PillButton):
+    """Secondary button: light fill, dark text."""
+
+    def __init__(self, **kw):
+        kw.setdefault("bg", SURF2)
+        kw.setdefault("bg_down", LINE)
+        kw.setdefault("fg", [0.09, 0.12, 0.22, 1])
+        super().__init__(**kw)
 
 
 class Pill(Label):
@@ -363,25 +425,48 @@ class Pill(Label):
 
 
 class PowerButton(ButtonBehavior, Widget):
-    color = ListProperty(GREY)
+    """Big round connect button with a soft halo; the halo pulses while `busy`."""
+    color = ListProperty(BLUE)
+    busy = BooleanProperty(False)
+    phase = NumericProperty(0)
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        for name in ("pos", "size", "color", "state"):
+        self._ev = None
+        for name in ("pos", "size", "color", "state", "phase"):
             self.bind(**{name: self._draw})
+        self.bind(busy=self._on_busy)
+        self._on_busy()
+        self._draw()
+
+    def _on_busy(self, *_):
+        if self.busy and self._ev is None:
+            self._ev = Clock.schedule_interval(self._step, 1 / 30.0)
+        elif not self.busy and self._ev is not None:
+            self._ev.cancel()
+            self._ev = None
+            self.phase = 0
+
+    def _step(self, dt):
+        self.phase = (self.phase + dt / 1.4) % 1.0
 
     def _draw(self, *_):
         self.canvas.clear()
         cx, cy = self.center
-        r = min(self.size) / 2.0 - dp(4)
+        r = min(self.size) / 2.0 * 0.78
         c = self.color
         with self.canvas:
-            Color(c[0], c[1], c[2], 0.22 if self.state == "down" else 0.10)
+            Color(c[0], c[1], c[2], 0.13)
+            Ellipse(pos=(cx - r * 1.22, cy - r * 1.22), size=(r * 2.44, r * 2.44))
+            if self.busy:
+                k = 1 + 0.30 * self.phase
+                Color(c[0], c[1], c[2], 0.30 * (1 - self.phase))
+                Ellipse(pos=(cx - r * k, cy - r * k), size=(r * 2 * k, r * 2 * k))
+            Color(*(c[:3] + [0.82 if self.state == "down" else 1]))
             Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
-            Color(*c)
-            Line(circle=(cx, cy, r), width=dp(3))
-            Line(circle=(cx, cy, r * 0.36, 40, 320), width=dp(4), cap="round")
-            Line(points=[cx, cy + r * 0.06, cx, cy + r * 0.52], width=dp(4), cap="round")
+            Color(1, 1, 1, 1)
+            Line(circle=(cx, cy, r * 0.38, 40, 320), width=dp(3.6), cap="round")
+            Line(points=[cx, cy + r * 0.05, cx, cy + r * 0.52], width=dp(3.6), cap="round")
 
 
 class SpeedGraph(Widget):
@@ -399,10 +484,12 @@ class SpeedGraph(Widget):
         w, h = self.size
         pad = dp(10)
         with self.canvas:
-            Color(*SURF)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(14)])
+            Color(1, 1, 1, 1)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(16)])
+            Color(*LINE)
+            Line(rounded_rectangle=(x0, y0, w, h, dp(16)), width=1)
             peak = max([50000.0] + list(self.down) + list(self.up))
-            for data, col in ((self.up, (0.70, 0.50, 1, 1)), (self.down, (0.25, 0.78, 0.95, 1))):
+            for data, col in ((self.up, (0.55, 0.35, 0.90, 1)), (self.down, (0.13, 0.45, 0.96, 1))):
                 if len(data) > 1:
                     off, pts = HIST - len(data), []
                     for i, v in enumerate(data):
@@ -417,32 +504,36 @@ class ServerRow(ButtonBehavior, Card):
     subtitle = StringProperty("")
     ping_text = StringProperty("")
     ping_bg = ListProperty(GREY)
+    flag = StringProperty("")
 
     def __init__(self, proxy, **kw):
         super().__init__(**kw)
         self.proxy = proxy
         ms = proxy.ms
+        self.flag = pc.flag_path_cached(proxy.cc)
+        where = ("  -  " + proxy.country) if proxy.country else ""
         if proxy.kind == "v2ray":
             self.title = (proxy.name or proxy.addr)[:28]
             kind = "%s  %s" % ((proxy.proto or "v2ray").upper(), (proxy.sec or "none").upper())
             verified = bool(proxy.ok_real)
-            self.subtitle = kind + ("  verified" if verified else "  unverified")
+            self.subtitle = kind + ("  verified" if verified else "  unverified") + where
             self.ping_text = ("%d ms" % ms) if (ms and verified) else "?"
             good = verified and ms
         else:
             self.title = proxy.addr
-            self.subtitle = "SOCKS5" if proxy.kind == "socks5" else "HTTP"
+            self.subtitle = ("SOCKS5" if proxy.kind == "socks5" else "HTTP") + where
             self.ping_text = ("%d ms" % ms) if ms else "-"
             good = ms
-        self.ping_bg = [0.2, 0.25, 0.37, 1] if not good else ([0.13, 0.55, 0.36, 1] if ms < 500 else
-                                                              [0.70, 0.52, 0.10, 1] if ms < 1200 else [0.75, 0.38, 0.12, 1])
+        self.ping_bg = [0.62, 0.66, 0.76, 1] if not good else ([0.10, 0.68, 0.42, 1] if ms < 500 else
+                                                               [0.90, 0.62, 0.05, 1] if ms < 1200 else [0.90, 0.45, 0.15, 1])
         self.bind(on_release=lambda *_: App.get_running_app().connect_to(self.proxy))
 
 
 class ConnScreen(Screen):
     title_text = StringProperty("")
     big_text = StringProperty("")
-    ring = ListProperty(GREY)
+    ring = ListProperty(BLUE)
+    busy = BooleanProperty(False)
     down_text = StringProperty("0 B/s")
     up_text = StringProperty("0 B/s")
     ping_text = StringProperty("-")
@@ -458,6 +549,13 @@ class ConnScreen(Screen):
 def _android_activity():
     from jnius import autoclass
     return autoclass("org.kivy.android.PythonActivity").mActivity
+
+
+def android_view(url):
+    from jnius import autoclass
+    Intent = autoclass("android.content.Intent")
+    Uri = autoclass("android.net.Uri")
+    _android_activity().startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
 
 
 def android_share(text):
@@ -476,15 +574,24 @@ def _sort_key(p):
     return (unverified, p.ms or 10 ** 9)
 
 
-class ProxyScoutApp(App):
-    title = "ProxyScout"
+class AmizooApp(App):
+    title = "Amizoo"
+    logo = StringProperty(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png"))
+    port_text = StringProperty("any")
     progress = NumericProperty(0)
     scanning = BooleanProperty(False)
     vpn_on = BooleanProperty(False)
-    status_text = StringProperty("Tap 'Find servers' to search.")
+    status_text = StringProperty("Tap the big button, or 'Find servers'.")
+    hero_text = StringProperty("Tap to connect")
+    hero_sub = StringProperty("The best server is picked for you")
+    hero_color = ListProperty(BLUE)
+    hero_busy = BooleanProperty(False)
 
     def build(self):
-        Window.clearcolor = (0.043, 0.059, 0.10, 1)
+        Window.clearcolor = BG
+        self.auto_connect = False
+        self.icon = self.logo
+        self.port_filter = None                                  # None = any port (freeproxy.world ?port=)
         Window.bind(on_keyboard=self._on_key)
         self.working, self.total, self.tested = [], 0, 0
         self.tab = "all"
@@ -502,10 +609,16 @@ class ProxyScoutApp(App):
 
     def on_start(self):
         self.cache_path = os.path.join(self.user_data_dir, "last_scan.json")
+        self.settings_path = os.path.join(self.user_data_dir, "settings.json")
+        pc.CACHE_FILE = os.path.join(self.user_data_dir, "v2ray_cache.txt")
+        pc.FLAG_DIR = os.path.join(self.user_data_dir, "flags")
+        self._geo_busy = False
+        self._load_settings()
         self.working = pc.load_results(self.cache_path)
         if self.working:
             self.status_text = "Last scan: %d servers (not re-tested)." % len(self.working)
         self._refresh_list()
+        self._geo_async()
         Clock.schedule_interval(self._tick, 1.0)
 
     def on_pause(self):
@@ -536,7 +649,26 @@ class ProxyScoutApp(App):
             rows.add_widget(ServerRow(p))
         if not shown:
             rows.add_widget(Label(text="Nothing here yet.", size_hint_y=None, height=dp(80),
-                                  color=(0.5, 0.55, 0.68, 1), font_size=dp(14)))
+                                  color=(0.42, 0.47, 0.60, 1), font_size=dp(14)))
+
+    def _best(self):
+        return self.working[0] if self.working else None
+
+    def quick_connect(self):
+        """One tap: disconnect if connected, else connect to the best server (searching first when the list is empty)."""
+        if self.engine.state in ("starting", "running"):
+            self.engine.disconnect()
+            return
+        if self.scanning:
+            self.auto_connect = False
+            self.stop_evt.set()
+            return
+        best = self._best()
+        if best:
+            self.connect_to(best)
+        else:
+            self.auto_connect = True
+            self.scan(False)
 
     # ================================================================== scanning
     def toggle_scan(self):
@@ -574,8 +706,10 @@ class ProxyScoutApp(App):
             if from_clipboard:
                 cands = pc.parse_proxies(clip, ("socks5", "http")) + pc.parse_v2ray(clip)
             else:
-                self._ui(self._say, "Downloading lists (freeproxy.world + V2Ray lists)...")
-                cands = pc.fetch_candidates(kinds, log=lambda m: self._ui(self._say, m), stop=stop)
+                self._ui(self._say, "Downloading lists (freeproxy.world%s + V2Ray lists)..." % (
+                    (" port %d" % self.port_filter) if self.port_filter else ""))
+                cands = pc.fetch_candidates(kinds, log=lambda m: self._ui(self._say, m), stop=stop,
+                                            port=self.port_filter)
             if stop.is_set():
                 return
             if not cands:
@@ -659,14 +793,38 @@ class ProxyScoutApp(App):
         self._refresh_list()
         if self.working:
             pc.save_results(self.cache_path, self.working)
+            self._geo_async()
         n = len(self.working)
         v2 = sum(1 for x in self.working if x.kind == "v2ray")
+        if self.auto_connect:
+            self.auto_connect = False
+            if self._best() and not stopped:
+                self.connect_to(self._best())
         if stopped:
             self.status_text = "Stopped. %d servers." % n
         elif self.tested:
             note = "" if self.xray_ok else "  (V2Ray unverified: Xray core missing)"
             self.status_text = ("%d ready (%d V2Ray verified). Tap one to connect.%s" % (n, v2, note)) if n else \
                 "None passed. Search again - free lists change fast."
+
+    def _geo_async(self):
+        """Country name + flag for the listed servers (background; the list redraws when it is done)."""
+        if self._geo_busy or not self.working:
+            return
+        self._geo_busy = True
+        items = list(self.working[:MAX_SHOWN])
+
+        def work():
+            try:
+                pc.geolocate(items)
+                for cc in {p.cc for p in items if p.cc}:
+                    pc.flag_path(cc)
+                if self.working:
+                    pc.save_results(self.cache_path, self.working)
+            finally:
+                self._geo_busy = False
+                self._ui(self._refresh_list)
+        threading.Thread(target=work, daemon=True).start()
 
     def reping(self):
         """Measure again from this phone: SOCKS5/HTTP by timing requests, V2Ray through the Xray core."""
@@ -705,22 +863,79 @@ class ProxyScoutApp(App):
             pc.save_results(self.cache_path, self.working)
         self.status_text = "Ping updated: %d servers answered." % len(self.working)
 
+    # ================================================================== settings / port filter
+    def _load_settings(self):
+        try:
+            with open(self.settings_path, encoding="utf-8") as f:
+                port = int(json.load(f).get("port") or 0)
+            self.set_port(port if 1 <= port <= 65535 else None, save=False)
+        except (OSError, ValueError, TypeError, AttributeError):
+            self.set_port(None, save=False)
+
+    def set_port(self, port, save=True):
+        self.port_filter = port
+        self.port_text = str(port) if port else "any"
+        if save:
+            try:
+                with open(self.settings_path, "w", encoding="utf-8") as f:
+                    json.dump({"port": port or 0}, f)
+            except OSError:
+                pass
+
+    def open_port_dialog(self):
+        mv = ModalView(size_hint=(0.88, None), height=dp(250), background="", background_color=(0.05, 0.08, 0.16, 0.45))
+        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10), bg=[1, 1, 1, 1])
+        card.add_widget(Label(text="SOCKS5 / HTTP port (freeproxy.world)", font_size=dp(15), bold=True,
+                              color=(0.09, 0.12, 0.22, 1), size_hint_y=None, height=dp(28)))
+        box = TextInput(text=str(self.port_filter or ""), hint_text="e.g. 8080   (empty = any port)", multiline=False,
+                        input_filter="int", input_type="number", font_size=dp(18), size_hint_y=None, height=dp(48),
+                        padding=(dp(12), dp(12)))
+        card.add_widget(box)
+        msg = Label(text="", font_size=dp(12), color=(0.90, 0.25, 0.30, 1), size_hint_y=None, height=dp(20))
+        card.add_widget(msg)
+        row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+
+        def apply(*_):
+            raw = box.text.strip()
+            if not raw:
+                self.set_port(None)
+            else:
+                n = int(raw)
+                if not 1 <= n <= 65535:
+                    msg.text = "Port must be 1 - 65535"
+                    return
+                self.set_port(n)
+            self.status_text = ("Port filter: %s. It applies to the next search." % self.port_text)
+            mv.dismiss()
+
+        clear = GhostButton(text="Any port")
+        clear.bind(on_release=lambda *_: (setattr(box, "text", ""), apply()))
+        ok = PillButton(text="Apply")
+        ok.bind(on_release=apply)
+        row.add_widget(clear)
+        row.add_widget(ok)
+        card.add_widget(row)
+        mv.add_widget(card)
+        mv.open()
+        Clock.schedule_once(lambda dt: setattr(box, "focus", True), 0.2)
+
     # ================================================================== menu
     def open_menu(self):
-        mv = ModalView(size_hint=(0.9, None), height=dp(430), background="", background_color=(0, 0, 0, 0.6))
-        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10), bg=SURF)
-        items = (("Paste a list from the clipboard", lambda: self.scan(True)),
+        mv = ModalView(size_hint=(0.9, None), height=dp(500), background="", background_color=(0.05, 0.08, 0.16, 0.45))
+        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10), bg=[1, 1, 1, 1])
+        items = (("Port for SOCKS5/HTTP:  %s" % self.port_text, self.open_port_dialog),
+                 ("Paste a list from the clipboard", lambda: self.scan(True)),
                  ("Re-ping all servers", self.reping),
                  ("Copy Telegram proxy links", lambda: self.copy_all("tg")),
                  ("Copy config list (v2rayNG / NPV)", lambda: self.copy_all("v2ray")),
                  ("Share all", self.share_all))
         for text, fn in items:
-            b = PillButton(text=text, size_hint_y=None, height=dp(46), bg=SURF2, bg_down=[0.20, 0.24, 0.36, 1])
+            b = GhostButton(text=text, size_hint_y=None, height=dp(46))
             b.bind(on_release=lambda *_, f=fn: (mv.dismiss(), f()))
             card.add_widget(b)
-        note = Label(text="SOCKS5/HTTP: freeproxy.world.  V2Ray: public GitHub lists, verified with the Xray core.\n"
+        note = Label(text="SOCKS5/HTTP: freeproxy.world only.  V2Ray: Iranian collectors + public lists, verified with Xray.\n"
                           "Ping is measured by this phone. Free proxies can read unencrypted traffic.",
-                     font_size=dp(11), color=(0.5, 0.55, 0.68, 1), halign="center")
+                     font_size=dp(11), color=(0.42, 0.47, 0.60, 1), halign="center")
         note.bind(size=lambda w, s: setattr(w, "text_size", (s[0], None)))
         card.add_widget(note)
         mv.add_widget(card)
@@ -737,6 +952,8 @@ class ProxyScoutApp(App):
         c = self._conn()
         c.down_hist, c.up_hist, c.error_text, c.ping_text = [], [], "", "-"
         c.title_text = (proxy.name or proxy.addr) if proxy.kind == "v2ray" else "%s  %s" % (proxy.kind.upper(), proxy.addr)
+        if proxy.country:
+            c.title_text += "  (%s)" % proxy.country
         self._last_rx = self._last_tx = 0
         self._last_tick, self._last_ping, self._direct = time.time(), 0.0, None
         self.root.current = "conn"
@@ -762,6 +979,28 @@ class ProxyScoutApp(App):
             threading.Thread(target=self.local.stop, daemon=True).start()
         elif self.current:
             threading.Thread(target=self.local.start, args=(self.current,), daemon=True).start()
+
+    def open_telegram_local(self):
+        """Start the local proxy if needed, then hand 127.0.0.1:10818 (SOCKS5) to Telegram."""
+        if not self.current:
+            return
+
+        def work():
+            if not self.local.running:
+                self.local.start(self.current)
+            if self.local.running:
+                self._ui(self._launch_tg)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _launch_tg(self):
+        link = "tg://socks?server=127.0.0.1&port=%d" % xt.LOCAL_SOCKS
+        if platform == "android":
+            try:
+                android_view(link)
+                return
+            except Exception:
+                pass
+        self.copy_text(link, "Telegram link copied.")
 
     def copy_current(self):
         if self.current:
@@ -790,9 +1029,23 @@ class ProxyScoutApp(App):
             self._last_rx = self._last_tx = 0
             if st != "starting":
                 c.down_text = c.up_text = "0 B/s"
-        label, ring = {"stopped": ("Disconnected", GREY), "starting": ("Connecting...", AMBER),
+        label, ring = {"stopped": ("Disconnected", BLUE), "starting": ("Connecting...", AMBER),
                        "running": ("Connected", GREEN), "error": ("Failed", RED)}.get(st, ("...", GREY))
-        c.ring = ring
+        c.ring = BLUE if st == "stopped" else ring
+        c.busy = st == "starting"
+        if self.scanning and st != "running":
+            self.hero_text, self.hero_color, self.hero_busy = "Finding servers...", AMBER, True
+        else:
+            self.hero_text, self.hero_color = {"stopped": ("Tap to connect", BLUE), "starting": ("Connecting...", AMBER),
+                                               "running": ("Connected", GREEN), "error": ("Connection failed", RED)}.get(
+                st, ("Tap to connect", BLUE))
+            self.hero_busy = st == "starting"
+        if st in ("starting", "running"):
+            self.hero_sub = c.title_text if st == "starting" else "%s  -  %s" % (c.title_text, fmt_time(s["uptime"]))
+        elif self.scanning:
+            self.hero_sub = self.status_text
+        else:
+            self.hero_sub = "The best server is picked for you" if not self.current else c.title_text
         c.big_text = "[b]%s[/b]\n[size=15sp]%s[/size]" % (label, fmt_time(s["uptime"]) if st == "running" else
                                                          ("simulation" if self.engine.simulated else "tap the button"))
         if st == "running":
@@ -857,4 +1110,4 @@ class ProxyScoutApp(App):
 
 
 if __name__ == "__main__":
-    ProxyScoutApp().run()
+    AmizooApp().run()
