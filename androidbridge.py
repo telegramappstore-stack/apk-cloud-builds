@@ -36,6 +36,15 @@ def xray_binary():
     return shutil.which("xray")
 
 
+def native_lib_listing():
+    """What Android actually put in the app's native library folder (for error messages)."""
+    try:
+        d = str(_activity().getApplicationInfo().nativeLibraryDir)
+        return "%s: %s" % (d, ", ".join(sorted(os.listdir(d))) or "(empty)")
+    except Exception as e:
+        return "cannot list native libs (%s)" % type(e).__name__
+
+
 # ------------------------------------------------------------------ VPN layer (Java VpnService + tun2socks)
 def hev_config(socks_port, mtu=1500):
     """Config for hev-socks5-tunnel: TUN packets -> Xray's local SOCKS5. mapdns makes DNS resolve at the far end."""
