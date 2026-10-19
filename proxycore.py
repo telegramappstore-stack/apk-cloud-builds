@@ -36,12 +36,13 @@ SOURCES = {
 
 class Proxy:
     """kind: 'socks5' | 'http' | 'v2ray'. v2ray entries also carry the original share link."""
-    __slots__ = ("kind", "host", "port", "ms", "link", "proto", "sec", "sni", "name", "tcp")
+    __slots__ = ("kind", "host", "port", "ms", "link", "proto", "sec", "sni", "name", "tcp", "ok_real")
 
     def __init__(self, kind, host, port, ms=None, link=None, proto=None, sec=None, sni=None, name=None):
         self.kind, self.host, self.port, self.ms = kind, host, int(port), ms
         self.link, self.proto, self.sec, self.sni, self.name = link, proto, sec, sni, name
         self.tcp = None
+        self.ok_real = None          # True once a real request went through the Xray core
 
     @property
     def addr(self):
@@ -49,7 +50,7 @@ class Proxy:
 
     def to_dict(self):
         return {"kind": self.kind, "host": self.host, "port": self.port, "ms": self.ms, "link": self.link,
-                "proto": self.proto, "sec": self.sec, "sni": self.sni, "name": self.name, "tcp": self.tcp}
+                "proto": self.proto, "sec": self.sec, "sni": self.sni, "name": self.name, "tcp": self.tcp, "ok_real": self.ok_real}
 
 
 # ------------------------------------------------------------------ parsing / fetching
@@ -551,6 +552,7 @@ def load_results(path):
                 p = Proxy(d["kind"], d["host"], d["port"], d.get("ms"), d.get("link"), d.get("proto"),
                           d.get("sec"), d.get("sni"), d.get("name"))
                 p.tcp = d.get("tcp")
+                p.ok_real = d.get("ok_real")
                 out.append(p)
             return out
     except (OSError, ValueError, KeyError, TypeError):
