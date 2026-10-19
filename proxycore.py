@@ -1,4 +1,4 @@
-"""proxycore - find and test free proxies, measure real latency, and export them as links.
+"""proxycore - find and test free proxies, and export them as links.
 
 Pure standard library (no Kivy), so it can be tested on a PC and keeps the APK small.
 """
@@ -18,17 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # A proxy is "working" only if it can fetch this URL and return HTTP 204 (no body to fake).
 TEST_TARGET = ("www.gstatic.com", 80, "/generate_204")
 
-# Each entry is a group of mirrors for the same list; the first mirror that answers is used.
+# SOCKS5 / HTTP proxies come ONLY from freeproxy.world (see fetch_freeproxy_world below).
+# V2Ray configs: each entry is a group of mirrors of the same list; the first one that answers is used.
 # jsDelivr mirrors the same GitHub files and is often reachable when raw.githubusercontent.com is not.
 SOURCES = {
-    "socks5": [
-        ("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-         "https://cdn.jsdelivr.net/gh/TheSpeedX/PROXY-List@master/socks5.txt"),
-        ("https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-         "https://cdn.jsdelivr.net/gh/hookzof/socks5_list@master/proxy.txt"),
-        ("https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-         "https://cdn.jsdelivr.net/gh/monosans/proxy-list@main/proxies/socks5.txt"),
-    ],
     # V2Ray / Xray share links (vmess, vless, trojan, ss). Many lists are base64 subscriptions - handled below.
     "v2ray": [
         ("https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/All_Configs_Sub.txt",
@@ -38,22 +31,17 @@ SOURCES = {
         ("https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
          "https://cdn.jsdelivr.net/gh/mahdibland/V2RayAggregator@master/sub/sub_merge.txt"),
     ],
-    "http": [
-        ("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-         "https://cdn.jsdelivr.net/gh/TheSpeedX/PROXY-List@master/http.txt"),
-        ("https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-         "https://cdn.jsdelivr.net/gh/monosans/proxy-list@main/proxies/http.txt"),
-    ],
 }
 
 
 class Proxy:
     """kind: 'socks5' | 'http' | 'v2ray'. v2ray entries also carry the original share link."""
-    __slots__ = ("kind", "host", "port", "ms", "link", "proto", "sec", "sni", "name")
+    __slots__ = ("kind", "host", "port", "ms", "link", "proto", "sec", "sni", "name", "tcp")
 
     def __init__(self, kind, host, port, ms=None, link=None, proto=None, sec=None, sni=None, name=None):
         self.kind, self.host, self.port, self.ms = kind, host, int(port), ms
         self.link, self.proto, self.sec, self.sni, self.name = link, proto, sec, sni, name
+        self.tcp = None
 
     @property
     def addr(self):
@@ -61,7 +49,7 @@ class Proxy:
 
     def to_dict(self):
         return {"kind": self.kind, "host": self.host, "port": self.port, "ms": self.ms, "link": self.link,
-                "proto": self.proto, "sec": self.sec, "sni": self.sni, "name": self.name}
+                "proto": self.proto, "sec": self.sec, "sni": self.sni, "name": self.name, "tcp": self.tcp}
 
 
 # ------------------------------------------------------------------ parsing / fetching
@@ -105,7 +93,9 @@ def _ssl_context():
 
 
 def fetch_text(url, timeout=15):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+        "Accept": "text/html,text/plain,*/*", "Accept-Language": "en-US,en;q=0.8"})
     with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
         return r.read(8_000_000).decode("utf-8", "ignore")
 
@@ -114,9 +104,92 @@ def _key(p):
     return p.link or (p.kind, p.host, p.port)
 
 
+
+# ------------------------------------------------------------------ freeproxy.world
+FPW_URL = "https://www.freeproxy.world/?type=%s&anonymity=&country=&speed=&port=&page=%d"
+_FPW_PAGES = 6                      # 50 rows per page
+# Cloudflare edge ranges: the site lists many of them as "http proxies" but they are not open proxies.
+_CF_NETS = [ipaddress.ip_network(n) for n in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18",
+    "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17",
+    "162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22")]
+_ROW_SPLIT = re.compile(r"<tr\b|\n(?=\|)", re.I)
+_IP = re.compile(r"(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])")
+
+
+def _is_cloudflare(host):
+    try:
+        ip = ipaddress.ip_address(host)
+        return any(ip in n for n in _CF_NETS)
+    except ValueError:
+        return False
+
+
+def parse_freeproxy_world(html):
+    """Rows of the freeproxy.world table (works on the raw HTML and on a text/markdown rendering).
+    Every row has links like ?port=80 and ?type=socks5, which is what we read."""
+    out, seen = [], set()
+    for chunk in _ROW_SPLIT.split(html):
+        m = _IP.search(chunk)
+        if not m:
+            continue
+        host = m.group(1)
+        pm = re.search(r"[?&]port=(\d{1,5})", chunk)
+        if pm:
+            port = int(pm.group(1))
+        else:
+            pm = re.search(re.escape(host) + r"[^\d]{0,80}?(\d{1,5})", chunk)
+            port = int(pm.group(1)) if pm else 0
+        types = {t.lower() for t in re.findall(r"[?&]type=(http|https|socks4|socks5)\b", chunk, re.I)}
+        try:
+            ok = ipaddress.ip_address(host).is_global and 1 <= port <= 65535 and not _is_cloudflare(host)
+        except ValueError:
+            ok = False
+        if not ok or not types:
+            continue
+        kinds = (["socks5"] if "socks5" in types else []) + (["http"] if types & {"http", "https"} else [])
+        for k in kinds:                       # socks4-only rows are skipped: Xray/hev need SOCKS5 or HTTP
+            if (k, host, port) not in seen:
+                seen.add((k, host, port))
+                out.append(Proxy(k, host, port))
+    return out
+
+
+def fetch_freeproxy_world(kind, log=lambda m: None, stop=None, pages=_FPW_PAGES):
+    """Download several pages of one proxy type from freeproxy.world."""
+    from concurrent.futures import ThreadPoolExecutor
+    pages_order = list(range(1, pages + 1))
+
+    def one(n):
+        if stop is not None and stop.is_set():
+            return []
+        try:
+            time.sleep(0.25 * (n - 1) % 1.0)            # tiny stagger, be polite to the site
+            return parse_freeproxy_world(fetch_text(FPW_URL % (kind, n), timeout=20))
+        except Exception as e:
+            log("freeproxy.world page %d (%s): %s" % (n, kind, type(e).__name__))
+            return []
+
+    out, seen = [], set()
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for items in ex.map(one, pages_order):
+            for p in items:
+                if p.kind == kind and (p.host, p.port) not in seen:
+                    seen.add((p.host, p.port))
+                    out.append(p)
+    log("freeproxy.world: %d %s proxies" % (len(out), kind))
+    return out
+
+
 def fetch_candidates(kinds, log=lambda m: None, stop=None):
     out, seen = [], set()
     for kind in kinds:
+        if kind in ("socks5", "http"):
+            for p in fetch_freeproxy_world(kind, log, stop):
+                if _key(p) not in seen:
+                    seen.add(_key(p))
+                    out.append(p)
+            continue
         for mirrors in SOURCES.get(kind, []):
             for url in mirrors:
                 if stop is not None and stop.is_set():
@@ -220,35 +293,6 @@ def parse_v2ray(text):
 
 
 # ------------------------------------------------------------------ testing
-# "ms" is a real round-trip time, not "time to download a page":
-#   socks5 / http : latency of a SECOND request sent over the same open connection (client -> proxy -> target -> back).
-#                   The first request also pays for TCP connect + SOCKS handshake + the proxy dialing the target, so it is
-#                   only used when the proxy closes the connection after one answer.
-#   v2ray         : TCP connect time to the server (= the ping to that server).
-# direct_ping() measures your own internet the same way, so the numbers are comparable.
-DIRECT_TARGETS = (("1.1.1.1", 443), ("8.8.8.8", 443), ("9.9.9.9", 443))
-
-
-def direct_ping(timeout=2.5, rounds=3):
-    """Your own internet latency without any proxy: best TCP connect time (ms) to a public anycast IP, or None."""
-    best = None
-    for _ in range(rounds):
-        for host, port in DIRECT_TARGETS:
-            t0 = time.monotonic()
-            try:
-                s = socket.create_connection((host, port), timeout=timeout)
-            except OSError:
-                continue
-            ms = (time.monotonic() - t0) * 1000.0
-            try:
-                s.close()
-            except OSError:
-                pass
-            best = ms if best is None else min(best, ms)
-            break
-    return None if best is None else max(1, int(round(best)))
-
-
 def _recvn(s, n):
     buf = b""
     while len(buf) < n:
@@ -259,40 +303,25 @@ def _recvn(s, n):
     return buf
 
 
-def _request(host, path, port):
-    hh = host if port == 80 else "%s:%d" % (host, port)
-    return ("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n"
-            % (path, hh)).encode()
-
-
-def _timed_204(s, req):
-    """One request/response over an open socket -> (got_204, milliseconds)."""
-    t0 = time.monotonic()
-    s.sendall(req)
+def _status_line(s):
     buf = b""
-    while b"\r\n\r\n" not in buf and len(buf) < 4096:
-        chunk = s.recv(1024)
+    while b"\n" not in buf and len(buf) < 512:
+        chunk = s.recv(256)
         if not chunk:
             break
         buf += chunk
-    ms = (time.monotonic() - t0) * 1000.0
-    first = buf.split(b"\r\n", 1)[0]
-    return first.startswith(b"HTTP/") and b" 204" in first, ms
+    return buf.split(b"\n", 1)[0]
 
 
-def _measure(s, req):
-    ok, cold = _timed_204(s, req)
-    if not ok:
-        return None
-    try:
-        ok2, warm = _timed_204(s, req)                # the real round trip: connection already open
-    except OSError:
-        return max(1, int(cold))
-    return max(1, int(warm if ok2 else cold))
+def _request(host, path, port):
+    hh = host if port == 80 else "%s:%d" % (host, port)
+    return ("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+            % (path, hh)).encode()
 
 
 def check_socks5(host, port, timeout=6.0, target=TEST_TARGET):
     th, tp, path = target
+    t0 = time.monotonic()
     try:
         s = socket.create_connection((host, port), timeout=timeout)
     except OSError:
@@ -316,7 +345,10 @@ def check_socks5(host, port, timeout=6.0, target=TEST_TARGET):
             _recvn(s, _recvn(s, 1)[0] + 2)
         else:
             return None
-        return _measure(s, _request(th, path, tp))
+        s.sendall(_request(th, path, tp))
+        if b" 204" not in _status_line(s):
+            return None
+        return int((time.monotonic() - t0) * 1000)
     except (OSError, IndexError, ValueError):
         return None
     finally:
@@ -328,6 +360,7 @@ def check_socks5(host, port, timeout=6.0, target=TEST_TARGET):
 
 def check_http(host, port, timeout=6.0, target=TEST_TARGET):
     th, tp, path = target
+    t0 = time.monotonic()
     try:
         s = socket.create_connection((host, port), timeout=timeout)
     except OSError:
@@ -335,7 +368,11 @@ def check_http(host, port, timeout=6.0, target=TEST_TARGET):
     try:
         s.settimeout(timeout)
         url = "http://%s%s%s" % (th, "" if tp == 80 else ":%d" % tp, path)
-        return _measure(s, _request(th, url, tp))                    # absolute-URI form for proxies
+        s.sendall(_request(th, url, tp))                             # absolute-URI form for proxies
+        line = _status_line(s)
+        if not line.startswith(b"HTTP/") or b" 204" not in line:
+            return None
+        return int((time.monotonic() - t0) * 1000)
     except (OSError, ValueError):
         return None
     finally:
@@ -365,8 +402,9 @@ def _is_ip(host):
 
 
 def check_v2ray(p, timeout=6.0):
-    """ms = TCP connect time (the ping to the server; DNS and the TLS handshake are not counted).
-    Reachability only: whether the config really authenticates is proven by the Xray core when you connect."""
+    """Reachability only: TCP connect (+ TLS handshake for tls/reality). It cannot prove the config
+    authenticates and carries traffic - that needs the Xray core."""
+    t0 = time.monotonic()
     conn = None
     try:
         ga = _global_addr(p.host, p.port)
@@ -375,15 +413,13 @@ def check_v2ray(p, timeout=6.0):
         s = socket.socket(ga[0], socket.SOCK_STREAM)
         conn = s
         s.settimeout(timeout)
-        t0 = time.monotonic()
         s.connect(ga[1])
-        ms = max(1, int((time.monotonic() - t0) * 1000))
         if p.sec in ("tls", "reality", "xtls"):
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             conn = ctx.wrap_socket(s, server_hostname=p.sni or (None if _is_ip(p.host) else p.host))
-        return ms
+        return int((time.monotonic() - t0) * 1000)
     except (OSError, ValueError):
         return None
     finally:
@@ -395,7 +431,7 @@ def check_v2ray(p, timeout=6.0):
 
 
 def test_many(proxies, on_result, stop, workers=48, timeout=6.0, target=TEST_TARGET):
-    """Test proxies in parallel; calls on_result(proxy, ok) as results arrive."""
+    """Test proxies in parallel; calls on_result(proxy, ok) from worker context as results arrive."""
     def job(p):
         if stop.is_set():
             return p, None
@@ -414,6 +450,59 @@ def test_many(proxies, on_result, stop, workers=48, timeout=6.0, target=TEST_TAR
             if ms is not None:
                 p.ms = ms
             on_result(p, ms is not None)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+
+# ------------------------------------------------------------------ real latency from this phone
+def tcp_ping(host, port, timeout=4.0):
+    """Time (ms) to open a TCP connection from this device to host:port - the 'raw' distance to the server."""
+    t0 = time.monotonic()
+    try:
+        ga = _global_addr(host, port)
+        if not ga:
+            return None
+        s = socket.socket(ga[0], socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(ga[1])
+        finally:
+            s.close()
+        return int((time.monotonic() - t0) * 1000)
+    except (OSError, ValueError):
+        return None
+
+
+def measure(p, samples=3, timeout=6.0, target=TEST_TARGET):
+    """Ping measured by THIS phone on ITS internet connection (not a number copied from a website).
+    tcp  = connect time to the server;  ms = median time for a full request through it (None if it failed)."""
+    vals = []
+    for _ in range(samples):
+        if p.kind == "v2ray":
+            v = check_v2ray(p, timeout)
+        elif p.kind == "socks5":
+            v = check_socks5(p.host, p.port, timeout, target)
+        else:
+            v = check_http(p.host, p.port, timeout, target)
+        if v is not None:
+            vals.append(v)
+    vals.sort()
+    return {"tcp": tcp_ping(p.host, p.port, min(timeout, 4.0)), "ms": vals[len(vals) // 2] if vals else None,
+            "ok": len(vals), "n": samples}
+
+
+def ping_many(proxies, on_result, stop, samples=3, workers=24, timeout=6.0):
+    def job(p):
+        return p, (None if stop.is_set() else measure(p, samples, timeout))
+
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
+        for f in as_completed([ex.submit(job, p) for p in proxies]):
+            if stop.is_set():
+                break
+            p, r = f.result()
+            if r is not None:
+                on_result(p, r)
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
 
@@ -457,7 +546,12 @@ def save_results(path, proxies):
 def load_results(path):
     try:
         with open(path, encoding="utf-8") as f:
-            return [Proxy(d["kind"], d["host"], d["port"], d.get("ms"), d.get("link"), d.get("proto"),
-                          d.get("sec"), d.get("sni"), d.get("name")) for d in json.load(f)]
+            out = []
+            for d in json.load(f):
+                p = Proxy(d["kind"], d["host"], d["port"], d.get("ms"), d.get("link"), d.get("proto"),
+                          d.get("sec"), d.get("sni"), d.get("name"))
+                p.tcp = d.get("tcp")
+                out.append(p)
+            return out
     except (OSError, ValueError, KeyError, TypeError):
         return []
