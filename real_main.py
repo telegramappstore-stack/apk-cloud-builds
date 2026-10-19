@@ -886,8 +886,8 @@ class AminiumApp(App):
             return
         binary = ab.xray_binary()
         if not binary:
-            self.status_text = ("Xray core not found. Put libxray.so into libs/arm64-v8a/ and rebuild "
-                                "(see SETUP.md), or set AMINIUM_XRAY on a PC.")
+            where = ab.native_lib_listing() if ab.is_android() else "PC: set AMINIUM_XRAY"
+            self.status_text = "Xray core not found - this APK was built without libxray.so. [%s]" % where[:160]
             return
         if mode == "vpn" and not ab.is_android():
             mode = "proxy"
