@@ -19,29 +19,48 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 TEST_TARGET = ("www.gstatic.com", 80, "/generate_204")
 
 # SOCKS5 / HTTP proxies come ONLY from freeproxy.world (see fetch_freeproxy_world below).
-# V2Ray configs: each entry is a group of mirrors of the same list; the first one that answers is used.
-# jsDelivr mirrors the same GitHub files and is often reachable when raw.githubusercontent.com is not.
+#
+# V2Ray configs: every entry below is a GROUP of mirrors of the same list. ALL groups are downloaded in
+# parallel and merged (one dead source no longer matters); inside a group the first mirror that answers wins.
+# Iranian-made collectors come first: they harvest the configs that Iranian Telegram channels publish every
+# few minutes, and some of them test the configs before publishing (a much higher share of them connect).
+def _gh(repo, path, branch="main"):
+    return ("https://raw.githubusercontent.com/%s/%s/%s" % (repo, branch, path),
+            "https://cdn.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path),
+            "https://fastly.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path),
+            "https://gcore.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path))
+
+
 SOURCES = {
-    # V2Ray / Xray share links (vmess, vless, trojan, ss). Many lists are base64 subscriptions - handled below.
     "v2ray": [
-        ("https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/All_Configs_Sub.txt",
-         "https://cdn.jsdelivr.net/gh/barry-far/V2ray-Configs@main/All_Configs_Sub.txt"),
-        ("https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
-         "https://cdn.jsdelivr.net/gh/Epodonios/v2ray-configs@main/All_Configs_Sub.txt"),
-        ("https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
-         "https://cdn.jsdelivr.net/gh/mahdibland/V2RayAggregator@master/sub/sub_merge.txt"),
+        # --- Iranian collectors (Telegram channels -> subscriptions)
+        _gh("hamedcode/port-based-v2ray-configs", "top100.txt"),            # liveness-tested, fastest first
+        _gh("yebekhe/TVC", "subscriptions/xray/normal/mix"),
+        _gh("yebekhe/TelegramV2rayCollector", "sub/normal/mix"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/reality"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/vless"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/vmess"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/trojan"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/shadowsocks"),
+        _gh("barry-far/V2ray-Configs", "All_Configs_Sub.txt"),
+        _gh("Epodonios/v2ray-configs", "All_Configs_Sub.txt"),
+        _gh("Delta-Kronecker/V2ray-Config", "config/batches/v2ray/batch_001.txt"),
+        _gh("mahdibland/V2RayAggregator", "sub/sub_merge.txt", "master"),
     ],
 }
+V2_PER_SOURCE = 1500            # cap per list so one huge file cannot crowd out the others
+CACHE_FILE = None               # set by the app: last good V2Ray list, used when every source is unreachable
 
 
 class Proxy:
     """kind: 'socks5' | 'http' | 'v2ray'. v2ray entries also carry the original share link."""
-    __slots__ = ("kind", "host", "port", "ms", "link", "proto", "sec", "sni", "name", "tcp", "ok_real")
+    __slots__ = ("kind", "host", "port", "ms", "link", "proto", "sec", "sni", "name", "tcp", "ok_real", "cc", "country")
 
     def __init__(self, kind, host, port, ms=None, link=None, proto=None, sec=None, sni=None, name=None):
         self.kind, self.host, self.port, self.ms = kind, host, int(port), ms
         self.link, self.proto, self.sec, self.sni, self.name = link, proto, sec, sni, name
         self.tcp = None
+        self.cc = self.country = None   # ISO code + English name (see geolocate)
         self.ok_real = None          # True once a real request went through the Xray core
 
     @property
@@ -50,7 +69,8 @@ class Proxy:
 
     def to_dict(self):
         return {"kind": self.kind, "host": self.host, "port": self.port, "ms": self.ms, "link": self.link,
-                "proto": self.proto, "sec": self.sec, "sni": self.sni, "name": self.name, "tcp": self.tcp, "ok_real": self.ok_real}
+                "proto": self.proto, "sec": self.sec, "sni": self.sni, "name": self.name, "tcp": self.tcp, "ok_real": self.ok_real,
+                "cc": self.cc, "country": self.country}
 
 
 # ------------------------------------------------------------------ parsing / fetching
@@ -107,7 +127,7 @@ def _key(p):
 
 
 # ------------------------------------------------------------------ freeproxy.world
-FPW_URL = "https://www.freeproxy.world/?type=%s&anonymity=&country=&speed=&port=&page=%d"
+FPW_URL = "https://www.freeproxy.world/?type=%s&anonymity=&country=&speed=&port=%s&page=%d"
 _FPW_PAGES = 6                      # 50 rows per page
 # Cloudflare edge ranges: the site lists many of them as "http proxies" but they are not open proxies.
 _CF_NETS = [ipaddress.ip_network(n) for n in (
@@ -156,8 +176,8 @@ def parse_freeproxy_world(html):
     return out
 
 
-def fetch_freeproxy_world(kind, log=lambda m: None, stop=None, pages=_FPW_PAGES):
-    """Download several pages of one proxy type from freeproxy.world."""
+def fetch_freeproxy_world(kind, log=lambda m: None, stop=None, pages=_FPW_PAGES, port=None):
+    """Download several pages of one proxy type from freeproxy.world. `port` (optional) = only that port."""
     from concurrent.futures import ThreadPoolExecutor
     pages_order = list(range(1, pages + 1))
 
@@ -166,7 +186,7 @@ def fetch_freeproxy_world(kind, log=lambda m: None, stop=None, pages=_FPW_PAGES)
             return []
         try:
             time.sleep(0.25 * (n - 1) % 1.0)            # tiny stagger, be polite to the site
-            return parse_freeproxy_world(fetch_text(FPW_URL % (kind, n), timeout=20))
+            return parse_freeproxy_world(fetch_text(FPW_URL % (kind, port or "", n), timeout=20))
         except Exception as e:
             log("freeproxy.world page %d (%s): %s" % (n, kind, type(e).__name__))
             return []
@@ -175,38 +195,93 @@ def fetch_freeproxy_world(kind, log=lambda m: None, stop=None, pages=_FPW_PAGES)
     with ThreadPoolExecutor(max_workers=3) as ex:
         for items in ex.map(one, pages_order):
             for p in items:
-                if p.kind == kind and (p.host, p.port) not in seen:
+                if p.kind == kind and (not port or p.port == port) and (p.host, p.port) not in seen:
                     seen.add((p.host, p.port))
                     out.append(p)
-    log("freeproxy.world: %d %s proxies" % (len(out), kind))
+    log("freeproxy.world: %d %s proxies%s" % (len(out), kind, (" (port %d)" % port) if port else ""))
     return out
 
 
-def fetch_candidates(kinds, log=lambda m: None, stop=None):
+def _fetch_group(mirrors, stop):
+    """First mirror of the group that answers -> (name, [Proxy]) or (name, None)."""
+    parts = mirrors[0].split("/")
+    name = "%s/%s" % (parts[3], parts[4]) if len(parts) > 4 else parts[2]
+    for url in mirrors:
+        if stop is not None and stop.is_set():
+            break
+        try:
+            items = parse_v2ray(fetch_text(url, timeout=20))
+            if items:
+                return name, items
+        except Exception:
+            continue
+    return name, None
+
+
+def _load_cache():
+    if not CACHE_FILE:
+        return []
+    try:
+        with open(CACHE_FILE, encoding="utf-8") as f:
+            return parse_v2ray(f.read())
+    except OSError:
+        return []
+
+
+def _save_cache(items):
+    if not CACHE_FILE or not items:
+        return
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(p.link for p in items[:3000]))
+    except OSError:
+        pass
+
+
+def fetch_v2ray(log=lambda m: None, stop=None):
+    """Download every V2Ray source in parallel and merge them (the order of SOURCES = priority)."""
+    groups = SOURCES["v2ray"]
+    results = [None] * len(groups)
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {ex.submit(_fetch_group, g, stop): i for i, g in enumerate(groups)}
+        for f in as_completed(futs):
+            i = futs[f]
+            try:
+                name, items = f.result()
+            except Exception:
+                continue
+            results[i] = items
+            log("%s: %s" % (name, ("%d configs" % len(items)) if items else "unreachable"))
+    out, seen = [], set()
+    for items in results:
+        for p in (items or [])[:V2_PER_SOURCE]:
+            if p.link not in seen:
+                seen.add(p.link)
+                out.append(p)
+    if out:
+        _save_cache(out)
+    else:
+        out = _load_cache()
+        if out:
+            log("All sources unreachable - using the last saved list (%d configs)." % len(out))
+    return out
+
+
+def fetch_candidates(kinds, log=lambda m: None, stop=None, port=None):
     out, seen = [], set()
     for kind in kinds:
+        if stop is not None and stop.is_set():
+            return out
         if kind in ("socks5", "http"):
-            for p in fetch_freeproxy_world(kind, log, stop):
-                if _key(p) not in seen:
-                    seen.add(_key(p))
-                    out.append(p)
-            continue
-        for mirrors in SOURCES.get(kind, []):
-            for url in mirrors:
-                if stop is not None and stop.is_set():
-                    return out
-                host = url.split("/")[2]
-                try:
-                    text = fetch_text(url)
-                    items = parse_v2ray(text) if kind == "v2ray" else parse_proxies(text, (kind,))
-                except Exception as e:
-                    log("%s unavailable (%s)" % (host, type(e).__name__))
-                    continue
-                new = [p for p in items if _key(p) not in seen]
-                seen.update(_key(p) for p in new)
-                out.extend(new)
-                log("%s: %d %s proxies" % (host, len(new), kind))
-                break
+            items = fetch_freeproxy_world(kind, log, stop, port=port)
+        elif kind == "v2ray":
+            items = fetch_v2ray(log, stop)
+        else:
+            items = []
+        for p in items:
+            if _key(p) not in seen:
+                seen.add(_key(p))
+                out.append(p)
     return out
 
 
@@ -217,9 +292,14 @@ def pick_sample(cands, limit):
         by.setdefault(p.kind, []).append(p)
     per = max(1, limit // max(1, len(by)))
     out = []
-    for lst in by.values():
-        random.shuffle(lst)
-        out += lst[:per]
+    for kind, lst in by.items():
+        if kind == "v2ray":                       # head of the list = best (Iranian / tested) sources
+            head, rest = lst[:per // 2], lst[per // 2:]
+            random.shuffle(rest)
+            out += head + rest[:per - len(head)]
+        else:
+            random.shuffle(lst)
+            out += lst[:per]
     random.shuffle(out)
     return out
 
@@ -553,7 +633,70 @@ def load_results(path):
                           d.get("sec"), d.get("sni"), d.get("name"))
                 p.tcp = d.get("tcp")
                 p.ok_real = d.get("ok_real")
+                p.cc, p.country = d.get("cc"), d.get("country")
                 out.append(p)
             return out
     except (OSError, ValueError, KeyError, TypeError):
         return []
+
+
+# ------------------------------------------------------------------ country + flag
+GEO_URL = "http://ip-api.com/batch?fields=status,country,countryCode"
+FLAG_URL = "https://flagcdn.com/w40/%s.png"
+FLAG_DIR = None                 # set by the app (a cache folder)
+
+
+def geolocate(proxies, stop=None):
+    """Fill p.cc / p.country for proxies that have none. One batch request per 100 hosts (the answers keep the
+    order of the request, so domain names work too). Silent on failure: no country is shown then."""
+    todo = [p for p in proxies if not p.cc]
+    hosts = list(dict.fromkeys(p.host for p in todo))
+    found = {}
+    for i in range(0, len(hosts), 100):
+        if stop is not None and stop.is_set():
+            break
+        chunk = hosts[i:i + 100]
+        try:
+            req = urllib.request.Request(GEO_URL, data=json.dumps(chunk).encode(),
+                                         headers={"Content-Type": "application/json", "User-Agent": "Amizoo"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                rows = json.loads(r.read().decode("utf-8", "ignore"))
+            for h, row in zip(chunk, rows):
+                if row.get("status") == "success" and row.get("countryCode"):
+                    found[h] = (row["countryCode"].lower(), row.get("country") or row["countryCode"])
+        except Exception:
+            continue
+    for p in todo:
+        if p.host in found:
+            p.cc, p.country = found[p.host]
+
+
+def flag_path(cc):
+    """Local PNG of a country flag (downloaded once from flagcdn.com, then cached) or ''."""
+    import os
+    if not cc or not FLAG_DIR or not cc.isalpha():
+        return ""
+    path = os.path.join(FLAG_DIR, cc.lower() + ".png")
+    if os.path.exists(path):
+        return path
+    try:
+        os.makedirs(FLAG_DIR, exist_ok=True)
+        req = urllib.request.Request(FLAG_URL % cc.lower(), headers={"User-Agent": "Amizoo"})
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_context()) as r:
+            data = r.read(100000)
+        if data[:4] != b"\x89PNG":
+            return ""
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+    except Exception:
+        return ""
+
+
+def flag_path_cached(cc):
+    """Flag PNG only if it is already on disk (never touches the network - safe to call from the UI thread)."""
+    import os
+    if not cc or not FLAG_DIR or not cc.isalpha():
+        return ""
+    path = os.path.join(FLAG_DIR, cc.lower() + ".png")
+    return path if os.path.exists(path) else ""
