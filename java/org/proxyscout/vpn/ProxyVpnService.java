@@ -90,10 +90,10 @@ public class ProxyVpnService extends VpnService {
             return START_NOT_STICKY;
         }
         if (ACTION_START.equals(action)) {
-            final String cfg = intent.getStringExtra("xray_config");
-            int p = 10808;
-            try { p = Integer.parseInt(intent.getStringExtra("socks_port")); } catch (Exception ignored) { }
-            final int port = p;
+            // Python writes <filesDir>/xray.json before starting us; extras are only an optional override.
+            String extra = intent.getStringExtra("xray_config");
+            final String cfg = extra != null ? extra : new File(getFilesDir(), "xray.json").getAbsolutePath();
+            final int port = 10808;
             startForegroundSafe();
             setState("starting", "");
             final int g = ++generation;
@@ -130,7 +130,9 @@ public class ProxyVpnService extends VpnService {
             stopAll();
             setState("starting", "");
             try {
-                if (cfgPath == null) throw new IOException("no Xray config was given");
+                if (cfgPath == null || !new File(cfgPath).exists()) {
+                    throw new IOException("Xray config file is missing: " + cfgPath);
+                }
                 File bin = new File(getApplicationInfo().nativeLibraryDir, "libxray.so");
                 if (!bin.exists()) {
                     throw new IOException("libxray.so is not in the APK (" + bin.getParent() + "). The Xray core was not bundled.");
