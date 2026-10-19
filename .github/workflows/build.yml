@@ -39,6 +39,10 @@ jobs:
         run: |
           source /tmp/annot.sh
           run_logged 'python -m pip install --upgrade pip && pip install "git+https://github.com/kivy/buildozer.git" "cython<3.0" setuptools virtualenv'
+      - name: Prepare native parts (only if the project has prebuild.py)
+        run: |
+          source /tmp/annot.sh
+          if [ -f prebuild.py ]; then run_logged 'python prebuild.py'; else echo "no prebuild.py - skipped"; fi
       - name: Build APK
         run: |
           source /tmp/annot.sh
@@ -63,6 +67,11 @@ jobs:
                           names += t.getnames()
                       except Exception as e:
                           print("could not read", n, e)
+              libs = sorted(n for n in z.namelist() if n.startswith("lib/") and "xray" in n or "hev" in n and n.startswith("lib/"))
+              if os.path.exists("prebuild.py"):
+                  print("native libs in APK:", libs or "NONE")
+                  if len(libs) < 2:
+                      print("::warning title=APK_CHECK::APK_MISSING_NATIVE: libxray.so / libhev-socks5-tunnel.so not in the APK")
               print("APK:", apk, "| files in python bundle:", len(names))
               if len(names) < 100:
                   print("python bundle not readable - module check skipped")
