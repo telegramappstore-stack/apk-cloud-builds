@@ -111,12 +111,13 @@ def _batch(xray, group, legacy, stop, timeout, base_port):
             i, port = item
             if stop.is_set():
                 return i, None
-            a = pc.check_socks5("127.0.0.1", port, timeout)
-            if a is None:
-                return i, None
-            b = pc.check_socks5("127.0.0.1", port, timeout)          # 2nd request: connection already warm
-            return i, min(a, b) if b is not None else a
-        with ThreadPoolExecutor(max_workers=min(10, len(live))) as ex:
+            # like v2rayNG / NPV: ONE fresh request to https://www.google.com/generate_204 (retry once if it fails)
+            for _ in range(2):
+                a = pc.check_socks5("127.0.0.1", port, timeout, pc.V2RAY_TARGET)
+                if a is not None:
+                    return i, a
+            return i, None
+        with ThreadPoolExecutor(max_workers=min(6, len(live))) as ex:
             for i, ms in ex.map(one, live):
                 res[i] = ms
     finally:
