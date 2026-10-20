@@ -20,10 +20,42 @@ TEST_TARGET = ("www.gstatic.com", 80, "/generate_204")
 
 # SOCKS5 / HTTP proxies come ONLY from freeproxy.world (see fetch_freeproxy_world below).
 #
-# V2Ray configs come ONLY from this single subscription link (a BPB panel, "raw" list for Xray).
-V2_SUB_URL = "https://qv2zt7gqgnlgdfg-7vtb1.pages.dev/trqN0NacQe7dAav/sub/raw?app=xray"
-V2_NAME_PREFIX = "Amin"          # every config is shown as Amin01, Amin02, ...
-CACHE_FILE = None                # set by the app: last good list, used when the link is unreachable
+# V2Ray configs: every entry below is a GROUP of mirrors of the same list. ALL groups are downloaded in
+# parallel and merged (one dead source no longer matters); inside a group the first mirror that answers wins.
+# Iranian-made collectors come first: they harvest the configs that Iranian Telegram channels publish every
+# few minutes, and some of them test the configs before publishing (a much higher share of them connect).
+def _gh(repo, path, branch="main"):
+    return ("https://raw.githubusercontent.com/%s/%s/%s" % (repo, branch, path),
+            "https://cdn.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path),
+            "https://fastly.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path),
+            "https://gcore.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path))
+
+
+SOURCES = {
+    "v2ray": [
+        # --- Iranian collectors (Telegram channels -> subscriptions)
+        _gh("hamedcode/port-based-v2ray-configs", "top100.txt"),            # liveness-tested, fastest first
+        _gh("yebekhe/TVC", "subscriptions/xray/normal/mix"),
+        _gh("yebekhe/TelegramV2rayCollector", "sub/normal/mix"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/reality"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/vless"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/vmess"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/trojan"),
+        _gh("soroushmirzaei/telegram-configs-collector", "protocols/shadowsocks"),
+        _gh("barry-far/V2ray-Configs", "All_Configs_Sub.txt"),
+        _gh("Epodonios/v2ray-configs", "All_Configs_Sub.txt"),
+        _gh("Delta-Kronecker/V2ray-Config", "config/batches/v2ray/batch_001.txt"),
+        _gh("mahdibland/V2RayAggregator", "sub/sub_merge.txt", "master"),
+    ],
+}
+# --- my own subscription = the main V2Ray source (named Amin01, Amin02, ...). Only GITHUB_MAX configs come from GitHub.
+SUB_URL = "https://qv2zt7gqgnlgdfg-7vtb1.pages.dev/trqN0NacQe7dAav/sub/raw?app=xray#%F0%9F%92%A6%20BPB%20Raw"
+SUB_PREFIX = "Amin"
+GITHUB_MAX = 2                  # configs taken from the GitHub lists above (the first ones that are not in my sub)
+SUB_HELPERS_MAX = 200           # free SOCKS5/HTTP proxies tried (24 at a time) when my sub is not reachable directly
+V2_SAMPLE_MAX = 500             # V2Ray configs that go into a scan (my sub is never cut down to a random sample)
+V2_PER_SOURCE = 1500            # cap per list so one huge file cannot crowd out the others
+CACHE_FILE = None               # set by the app: last good V2Ray list, used when every source is unreachable
 
 
 class Proxy:
@@ -176,6 +208,22 @@ def fetch_freeproxy_world(kind, log=lambda m: None, stop=None, pages=_FPW_PAGES,
     return out
 
 
+def _fetch_group(mirrors, stop):
+    """First mirror of the group that answers -> (name, [Proxy]) or (name, None)."""
+    parts = mirrors[0].split("/")
+    name = "%s/%s" % (parts[3], parts[4]) if len(parts) > 4 else parts[2]
+    for url in mirrors:
+        if stop is not None and stop.is_set():
+            break
+        try:
+            items = parse_v2ray(fetch_text(url, timeout=20))
+            if items:
+                return name, items
+        except Exception:
+            continue
+    return name, None
+
+
 def _load_cache():
     if not CACHE_FILE:
         return []
@@ -196,37 +244,193 @@ def _save_cache(items):
         pass
 
 
-def _name_all(items):
-    for i, p in enumerate(items, 1):
-        p.name = "%s%02d" % (V2_NAME_PREFIX, i)
-    return items
+def _core(link):
+    """Link without its display name, to spot the same config under two names."""
+    return link if link.lower().startswith("vmess://") else link.split("#", 1)[0]
 
 
-def fetch_v2ray(log=lambda m: None, stop=None):
-    """Download the one subscription link (3 tries) and number the configs Amin01, Amin02, ..."""
-    items, err = [], ""
-    for n in range(3):
-        if stop is not None and stop.is_set():
-            return []
+def rename_link(link, name):
+    low = link.lower()
+    if low.startswith("vmess://"):
+        d = json.loads(_b64d(link[8:]))
+        d["ps"] = name
+        return "vmess://" + base64.b64encode(json.dumps(d, ensure_ascii=False).encode()).decode()
+    return link.split("#", 1)[0] + "#" + urllib.parse.quote(name)
+
+
+def _socks5_open(phost, pport, dhost, dport, timeout):
+    s = socket.create_connection((phost, pport), timeout)
+    try:
+        s.settimeout(timeout)
+        s.sendall(b"\x05\x01\x00")
+        if _recvn(s, 2) != b"\x05\x00":
+            raise OSError("socks5 handshake refused")
+        h = dhost.encode()
+        s.sendall(b"\x05\x01\x00\x03" + bytes([len(h)]) + h + struct.pack(">H", dport))
+        r = _recvn(s, 4)
+        if len(r) < 4 or r[1] != 0:
+            raise OSError("socks5 connect refused")
+        skip = {1: 4, 4: 16}.get(r[3])
+        if r[3] == 3:
+            skip = _recvn(s, 1)[0]
+        _recvn(s, (skip or 0) + 2)
+        return s
+    except Exception:
+        s.close()
+        raise
+
+
+def _dechunk(b):
+    out = b""
+    while b:
+        line, _, b = b.partition(b"\r\n")
         try:
-            items = parse_v2ray(fetch_text(V2_SUB_URL, timeout=25))
-            if items:
-                break
-            err = "the link returned no configs"
-        except Exception as e:
-            err = type(e).__name__
-        time.sleep(1.0)
-    if items:
-        _name_all(items)
-        _save_cache(items)
-        log("V2Ray subscription: %d configs" % len(items))
-        return items
-    items = _load_cache()
-    if items:
-        log("V2Ray subscription unreachable (%s) - using the last saved list (%d configs)." % (err, len(items)))
-        return _name_all(items)
-    log("V2Ray subscription unreachable (%s)." % err)
-    return []
+            n = int(line.split(b";")[0].strip(), 16)
+        except ValueError:
+            break
+        if n == 0:
+            break
+        out += b[:n]
+        b = b[n + 2:]
+    return out
+
+
+def fetch_via_proxy(url, p, timeout=9.0):
+    """GET an https URL through a SOCKS5 or HTTP(S-CONNECT) proxy (TLS is still verified end to end)."""
+    u = urllib.parse.urlsplit(url)
+    host, port = u.hostname, u.port or 443
+    path = (u.path or "/") + (("?" + u.query) if u.query else "")
+    if p.kind != "socks5":
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({"https": "http://%s:%d" % (p.host, p.port)}),
+                                         urllib.request.HTTPSHandler(context=_ssl_context()))
+        with op.open(urllib.request.Request(url.split("#", 1)[0], headers={"User-Agent": "Mozilla/5.0"}), timeout=timeout) as r:
+            return r.read(4_000_000).decode("utf-8", "ignore")
+    raw = _socks5_open(p.host, p.port, host, port, timeout)
+    try:
+        ss = _ssl_context().wrap_socket(raw, server_hostname=host)
+        ss.settimeout(timeout)
+        ss.sendall(("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\n"
+                    "Accept-Encoding: identity\r\nConnection: close\r\n\r\n" % (path, host)).encode())
+        data = b""
+        try:
+            while len(data) < 4_000_000:
+                chunk = ss.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        except (OSError, ssl.SSLError):
+            if not data:
+                raise
+    finally:
+        raw.close()
+    head, _, body = data.partition(b"\r\n\r\n")
+    if b" 200" not in head.split(b"\r\n", 1)[0]:
+        raise OSError("bad status")
+    if b"chunked" in head.lower():
+        body = _dechunk(body)
+    return body.decode("utf-8", "ignore")
+
+
+def _sub_via_helpers(helpers, log, stop):
+    pool = [p for p in helpers if p.kind in ("socks5", "http")]
+    random.shuffle(pool)
+    pool = pool[:SUB_HELPERS_MAX]
+    if not pool:
+        return None
+    log("My subscription is not reachable directly - trying %d free proxies to fetch it..." % len(pool))
+    done = []
+
+    def one(p):
+        if done or (stop is not None and stop.is_set()):
+            return None
+        try:
+            txt = fetch_via_proxy(SUB_URL, p)
+        except Exception:
+            return None
+        return (txt, p) if parse_v2ray(txt) else None
+
+    ex = ThreadPoolExecutor(max_workers=24)
+    try:
+        futs = [ex.submit(one, p) for p in pool]
+        for f in as_completed(futs):
+            r = f.result()
+            if r:
+                done.append(r)
+                log("Subscription fetched through proxy %s." % r[1].addr)
+                return r[0]
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    return None
+
+
+def fetch_sub(log=lambda m: None, stop=None, helpers=None):
+    """My own subscription -> [Proxy] named Amin01, Amin02, ... Direct first, then through free proxies, then the saved copy."""
+    text = None
+    try:
+        text = fetch_text(SUB_URL.split("#", 1)[0], timeout=12)
+        if not parse_v2ray(text):
+            text = None
+    except Exception:
+        text = None
+    if text is None and helpers and not (stop is not None and stop.is_set()):
+        text = _sub_via_helpers(helpers, log, stop)
+    sub_cache = (CACHE_FILE + ".sub") if CACHE_FILE else None
+    if text:
+        if sub_cache:
+            try:
+                with open(sub_cache, "w", encoding="utf-8") as f:
+                    f.write(text)
+            except OSError:
+                pass
+    elif sub_cache:
+        try:
+            with open(sub_cache, encoding="utf-8") as f:
+                text = f.read()
+            log("Subscription unreachable - using its last saved copy.")
+        except OSError:
+            pass
+    items = parse_v2ray(text)[:V2_PER_SOURCE] if text else []
+    out = []
+    for i, p in enumerate(items, 1):
+        name = "%s%02d" % (SUB_PREFIX, i)
+        try:
+            q = parse_v2ray_link(rename_link(p.link, name)) or p
+        except (ValueError, KeyError, TypeError):
+            q = p
+        q.name = name
+        out.append(q)
+    log("My subscription: %s" % (("%d configs" % len(out)) if out else "unreachable"))
+    return out
+
+
+def fetch_github(log=lambda m: None, stop=None, skip=(), limit=GITHUB_MAX):
+    """Only `limit` configs in total from the GitHub lists (first source that answers first); names are kept."""
+    out = []
+    for g in SOURCES["v2ray"]:
+        if len(out) >= limit or (stop is not None and stop.is_set()):
+            break
+        name, items = _fetch_group(g, stop)
+        if not items:
+            continue
+        for p in items:
+            if _core(p.link) not in skip and len(out) < limit:
+                out.append(p)
+        log("%s: took %d" % (name, len(out)))
+    return out
+
+
+def fetch_v2ray(log=lambda m: None, stop=None, helpers=None):
+    """My subscription (everything it has) + at most GITHUB_MAX configs from GitHub."""
+    sub = fetch_sub(log, stop, helpers)
+    gh = fetch_github(log, stop, {_core(p.link) for p in sub})
+    out = sub + gh
+    if out:
+        _save_cache(out)
+    else:
+        out = _load_cache()
+        if out:
+            log("All sources unreachable - using the last saved list (%d configs)." % len(out))
+    return out
 
 
 def fetch_candidates(kinds, log=lambda m: None, stop=None, port=None):
@@ -237,7 +441,7 @@ def fetch_candidates(kinds, log=lambda m: None, stop=None, port=None):
         if kind in ("socks5", "http"):
             items = fetch_freeproxy_world(kind, log, stop, port=port)
         elif kind == "v2ray":
-            items = fetch_v2ray(log, stop)
+            items = fetch_v2ray(log, stop, helpers=out)       # SOCKS5/HTTP found above can carry the sub download
         else:
             items = []
         for p in items:
@@ -255,8 +459,8 @@ def pick_sample(cands, limit):
     per = max(1, limit // max(1, len(by)))
     out = []
     for kind, lst in by.items():
-        if kind == "v2ray":                       # one small subscription: keep its order (Amin01, Amin02, ...)
-            out += lst[:per]
+        if kind == "v2ray":                       # head of the list = best (Iranian / tested) sources
+            out += lst[:V2_SAMPLE_MAX]
         else:
             random.shuffle(lst)
             out += lst[:per]
