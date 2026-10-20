@@ -5,9 +5,7 @@ import os
 import threading
 import time
 
-from kivy.animation import Animation
 from kivy.app import App
-from kivy.factory import Factory
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
 from kivy.core.window import Window
@@ -20,15 +18,12 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.screenmanager import FadeTransition, Screen, SlideTransition
+from kivy.uix.screenmanager import Screen
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.utils import platform
 
 import engine as en
-import ui_kit
-from ui_kit import THEMES, FadeLabel, SplashScreen, ThemeSwatch  # noqa: F401  (registered for KV)
 import proxycore as pc
 import xraytest as xt
 
@@ -44,6 +39,11 @@ SURF2, LINE = [0.91, 0.93, 0.98, 1], [0.87, 0.90, 0.95, 1]
 KV = r"""
 #:import dp kivy.metrics.dp
 #:import sp kivy.metrics.sp
+#:set BG (0.955, 0.965, 0.985, 1)
+#:set SURF (1, 1, 1, 1)
+#:set TXT (0.09, 0.12, 0.22, 1)
+#:set MUTED (0.42, 0.47, 0.60, 1)
+#:set ACC (0.13, 0.45, 0.96, 1)
 
 <LeftLabel@Label>:
     text_size: self.width, None
@@ -57,7 +57,6 @@ KV = r"""
     halign: 'left'
 
 <Card>:
-    bg: app.t_surf
     canvas.before:
         Color:
             rgba: self.bg
@@ -66,14 +65,12 @@ KV = r"""
             size: self.size
             radius: self.radius
         Color:
-            rgba: app.t_line
+            rgba: 0.87, 0.90, 0.95, 1
         Line:
             rounded_rectangle: self.x, self.y, self.width, self.height, self.radius[0]
             width: 1
 
 <PillButton>:
-    bg: app.t_acc
-    bg_down: app.t_acc_dn
     background_normal: ''
     background_down: ''
     background_color: 0, 0, 0, 0
@@ -87,11 +84,6 @@ KV = r"""
             pos: self.pos
             size: self.size
             radius: [dp(16)]
-
-<GhostButton>:
-    bg: app.t_surf2
-    bg_down: app.t_line
-    fg: app.t_txt
 
 <Pill>:
     bold: True
@@ -112,10 +104,10 @@ KV = r"""
     bold: True
     font_size: sp(13)
     allow_no_selection: False
-    color: (1, 1, 1, 1) if self.state == 'down' else app.t_muted
+    color: (1, 1, 1, 1) if self.state == 'down' else (0.42, 0.47, 0.60, 1)
     canvas.before:
         Color:
-            rgba: app.t_acc if self.state == 'down' else app.t_surf2
+            rgba: (0.13, 0.45, 0.96, 1) if self.state == 'down' else (0.91, 0.93, 0.98, 1)
         RoundedRectangle:
             pos: self.pos
             size: self.size
@@ -131,14 +123,14 @@ KV = r"""
     Label:
         text: root.caption
         font_size: sp(11)
-        color: app.t_muted
+        color: MUTED
 
 <ServerRow>:
     size_hint_y: None
     height: dp(66)
     padding: dp(16), dp(8), dp(12), dp(8)
     spacing: dp(10)
-    bg: app.t_surf2 if self.state == 'down' else app.t_surf
+    bg: (0.93, 0.95, 1, 1) if self.state == 'down' else (1, 1, 1, 1)
     Image:
         source: root.flag
         size_hint: None, None
@@ -151,32 +143,17 @@ KV = r"""
             text: root.title
             font_size: sp(16)
             bold: True
-            color: app.t_txt
+            color: TXT
         LeftLabel:
             text: root.subtitle
             font_size: sp(12)
-            color: app.t_muted
+            color: MUTED
     Pill:
         size_hint: None, None
         size: dp(80), dp(30)
         pos_hint: {'center_y': .5}
         text: root.ping_text
         bg: root.ping_bg
-
-<SpeedGraph>:
-    surf: app.t_surf
-    line: app.t_line
-
-<TitleLabel@Label>:
-    color: app.t_txt
-    bold: True
-    font_size: sp(15)
-    size_hint_y: None
-    height: dp(28)
-
-<FadeLabel>:
-    text_size: self.size
-    valign: 'middle'
 
 <ConnScreen>:
     name: 'conn'
@@ -197,7 +174,7 @@ KV = r"""
                 text: root.title_text
                 font_size: sp(15)
                 bold: True
-                color: app.t_txt
+                color: TXT
         FloatLayout:
             size_hint_y: None
             height: dp(176)
@@ -207,13 +184,12 @@ KV = r"""
                 pos_hint: {'center_x': .5, 'center_y': .5}
                 color: root.ring
                 busy: root.busy
-                breathe: app.vpn_on
                 on_release: app.toggle_connection()
-        FadeLabel:
+        Label:
             size_hint_y: None
             height: dp(54)
             markup: True
-            value: root.big_text
+            text: root.big_text
             font_size: sp(22)
             color: root.ring
             halign: 'center'
@@ -240,7 +216,7 @@ KV = r"""
         WrapLabel:
             text: root.detail_text
             font_size: sp(12)
-            color: app.t_muted
+            color: MUTED
         WrapLabel:
             text: root.error_text
             font_size: sp(11)
@@ -248,7 +224,7 @@ KV = r"""
         WrapLabel:
             text: root.local_text
             font_size: sp(12)
-            color: app.t_acc
+            color: ACC
         Widget:
         BoxLayout:
             size_hint_y: None
@@ -265,9 +241,6 @@ KV = r"""
                 on_release: app.copy_current()
 
 ScreenManager:
-    SplashScreen:
-        id: splash
-        name: 'splash'
     Screen:
         name: 'home'
         BoxLayout:
@@ -291,7 +264,7 @@ ScreenManager:
                     text: 'Amizoo'
                     font_size: sp(26)
                     bold: True
-                    color: app.t_txt
+                    color: TXT
                 PillButton:
                     size_hint: None, None
                     size: dp(104), dp(34)
@@ -302,12 +275,6 @@ ScreenManager:
                     bg: 0.10, 0.68, 0.42, 1
                     bg_down: 0.07, 0.55, 0.34, 1
                     on_release: app.open_conn()
-                GhostButton:
-                    size_hint: None, None
-                    size: dp(74), dp(34)
-                    pos_hint: {'center_y': .5}
-                    text: 'Theme'
-                    on_release: app.open_theme_dialog()
 
             Card:
                 size_hint_y: None
@@ -321,23 +288,20 @@ ScreenManager:
                     pos_hint: {'center_x': .5}
                     color: app.hero_color
                     busy: app.hero_busy
-                    breathe: app.vpn_on
                     on_release: app.quick_connect()
-                FadeLabel:
+                Label:
                     size_hint_y: None
                     height: dp(30)
-                    halign: 'center'
-                    value: app.hero_text
+                    text: app.hero_text
                     font_size: sp(18)
                     bold: True
-                    color: app.t_txt
-                FadeLabel:
+                    color: TXT
+                Label:
                     size_hint_y: None
                     height: dp(20)
-                    halign: 'center'
-                    value: app.hero_sub
+                    text: app.hero_sub
                     font_size: sp(12)
-                    color: app.t_muted
+                    color: MUTED
 
             BoxLayout:
                 size_hint_y: None
@@ -361,26 +325,25 @@ ScreenManager:
                     group: 'tab'
                     on_state: app.set_tab('http') if self.state == 'down' else None
 
-            FadeLabel:
+            LeftLabel:
                 size_hint_y: None
                 height: dp(20)
-                halign: 'left'
-                value: app.status_text
+                text: app.status_text
                 font_size: sp(12)
-                color: app.t_muted
+                color: MUTED
 
             Widget:
                 size_hint_y: None
                 height: dp(4)
                 canvas:
                     Color:
-                        rgba: app.t_line
+                        rgba: 0.87, 0.90, 0.95, 1
                     RoundedRectangle:
                         pos: self.pos
                         size: self.size
                         radius: [dp(2)]
                     Color:
-                        rgba: app.t_acc
+                        rgba: 0.13, 0.45, 0.96, 1
                     RoundedRectangle:
                         pos: self.pos
                         size: max(self.height, self.width * app.progress), self.height
@@ -403,8 +366,8 @@ ScreenManager:
                 PillButton:
                     font_size: sp(16)
                     text: 'Stop' if app.scanning else 'Find servers'
-                    bg: (0.90, 0.25, 0.30, 1) if app.scanning else app.t_acc
-                    bg_down: (0.75, 0.18, 0.24, 1) if app.scanning else app.t_acc_dn
+                    bg: (0.90, 0.25, 0.30, 1) if app.scanning else (0.13, 0.45, 0.96, 1)
+                    bg_down: (0.75, 0.18, 0.24, 1) if app.scanning else (0.09, 0.36, 0.82, 1)
                     on_release: app.toggle_scan()
                 GhostButton:
                     size_hint_x: None
@@ -448,7 +411,13 @@ class PillButton(Button):
 
 
 class GhostButton(PillButton):
-    """Secondary button: light fill, dark text (colors come from the theme in KV)."""
+    """Secondary button: light fill, dark text."""
+
+    def __init__(self, **kw):
+        kw.setdefault("bg", SURF2)
+        kw.setdefault("bg_down", LINE)
+        kw.setdefault("fg", [0.09, 0.12, 0.22, 1])
+        super().__init__(**kw)
 
 
 class Pill(Label):
@@ -456,10 +425,9 @@ class Pill(Label):
 
 
 class PowerButton(ButtonBehavior, Widget):
-    """Big round connect button with a soft halo; the halo pulses while `busy` (and breathes while `breathe`)."""
+    """Big round connect button with a soft halo; the halo pulses while `busy`."""
     color = ListProperty(BLUE)
     busy = BooleanProperty(False)
-    breathe = BooleanProperty(False)
     phase = NumericProperty(0)
 
     def __init__(self, **kw):
@@ -467,20 +435,20 @@ class PowerButton(ButtonBehavior, Widget):
         self._ev = None
         for name in ("pos", "size", "color", "state", "phase"):
             self.bind(**{name: self._draw})
-        self.bind(busy=self._on_busy, breathe=self._on_busy)
+        self.bind(busy=self._on_busy)
         self._on_busy()
         self._draw()
 
     def _on_busy(self, *_):
-        if (self.busy or self.breathe) and self._ev is None:
+        if self.busy and self._ev is None:
             self._ev = Clock.schedule_interval(self._step, 1 / 30.0)
-        elif not (self.busy or self.breathe) and self._ev is not None:
+        elif not self.busy and self._ev is not None:
             self._ev.cancel()
             self._ev = None
             self.phase = 0
 
     def _step(self, dt):
-        self.phase = (self.phase + dt / (1.4 if self.busy else 2.6)) % 1.0
+        self.phase = (self.phase + dt / 1.4) % 1.0
 
     def _draw(self, *_):
         self.canvas.clear()
@@ -490,18 +458,12 @@ class PowerButton(ButtonBehavior, Widget):
         with self.canvas:
             Color(c[0], c[1], c[2], 0.13)
             Ellipse(pos=(cx - r * 1.22, cy - r * 1.22), size=(r * 2.44, r * 2.44))
-            if self.busy or self.breathe:
-                for off in (0.0, 0.5):
-                    ph = (self.phase + off) % 1.0
-                    k = 1 + 0.30 * ph
-                    Color(c[0], c[1], c[2], 0.30 * (1 - ph))
-                    Ellipse(pos=(cx - r * k, cy - r * k), size=(r * 2 * k, r * 2 * k))
+            if self.busy:
+                k = 1 + 0.30 * self.phase
+                Color(c[0], c[1], c[2], 0.30 * (1 - self.phase))
+                Ellipse(pos=(cx - r * k, cy - r * k), size=(r * 2 * k, r * 2 * k))
             Color(*(c[:3] + [0.82 if self.state == "down" else 1]))
             Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
-            if self.busy:
-                ang = self.phase * 360
-                Color(1, 1, 1, 0.55)
-                Line(circle=(cx, cy, r * 0.86, ang, ang + 90), width=dp(2.4), cap="round")
             Color(1, 1, 1, 1)
             Line(circle=(cx, cy, r * 0.38, 40, 320), width=dp(3.6), cap="round")
             Line(points=[cx, cy + r * 0.05, cx, cy + r * 0.52], width=dp(3.6), cap="round")
@@ -510,12 +472,10 @@ class PowerButton(ButtonBehavior, Widget):
 class SpeedGraph(Widget):
     down = ListProperty([])
     up = ListProperty([])
-    surf = ListProperty([1, 1, 1, 1])
-    line = ListProperty(LINE)
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        for name in ("pos", "size", "down", "up", "surf", "line"):
+        for name in ("pos", "size", "down", "up"):
             self.bind(**{name: self._draw})
 
     def _draw(self, *_):
@@ -524,9 +484,9 @@ class SpeedGraph(Widget):
         w, h = self.size
         pad = dp(10)
         with self.canvas:
-            Color(*self.surf)
+            Color(1, 1, 1, 1)
             RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(16)])
-            Color(*self.line)
+            Color(*LINE)
             Line(rounded_rectangle=(x0, y0, w, h, dp(16)), width=1)
             peak = max([50000.0] + list(self.down) + list(self.up))
             for data, col in ((self.up, (0.55, 0.35, 0.90, 1)), (self.down, (0.13, 0.45, 0.96, 1))):
@@ -626,24 +586,9 @@ class AmizooApp(App):
     hero_sub = StringProperty("The best server is picked for you")
     hero_color = ListProperty(BLUE)
     hero_busy = BooleanProperty(False)
-    theme_name = StringProperty("light")
-    t_bg = ListProperty(THEMES["light"]["bg"])
-    t_surf = ListProperty(THEMES["light"]["surf"])
-    t_surf2 = ListProperty(THEMES["light"]["surf2"])
-    t_line = ListProperty(THEMES["light"]["line"])
-    t_txt = ListProperty(THEMES["light"]["txt"])
-    t_muted = ListProperty(THEMES["light"]["muted"])
-    t_acc = ListProperty(THEMES["light"]["acc"])
-    t_acc_dn = ListProperty(THEMES["light"]["acc_dn"])
 
     def build(self):
-        self.settings_path = os.path.join(self.user_data_dir, "settings.json")
-        self.settings = self._read_settings()
-        self.seen_rows = set()
-        self.set_theme(self.settings.get("theme", "light"), animate=False, save=False)
-        Window.clearcolor = self.t_bg
-        self.bind(t_bg=lambda *_: setattr(Window, "clearcolor", self.t_bg))
-        ui_kit.LOGO = self.logo
+        Window.clearcolor = BG
         self.auto_connect = False
         self.icon = self.logo
         self.port_filter = None                                  # None = any port (freeproxy.world ?port=)
@@ -675,7 +620,6 @@ class AmizooApp(App):
         self._refresh_list()
         self._geo_async()
         Clock.schedule_interval(self._tick, 1.0)
-        self.root.ids.splash.start(self._enter_home)
 
     def on_pause(self):
         return True
@@ -701,17 +645,11 @@ class AmizooApp(App):
         rows = self.root.ids.rows
         rows.clear_widgets()
         shown = [p for p in self.working if self.tab == "all" or p.kind == self.tab][:MAX_SHOWN]
-        for i, p in enumerate(shown):
-            row = ServerRow(p)
-            if self.root.current != "splash" and id(p) not in self.seen_rows:
-                self.seen_rows.add(id(p))                        # new rows fade in, one after another
-                row.opacity = 0
-                anim = Animation(opacity=1, d=0.35, t="out_quad")
-                Clock.schedule_once(lambda dt, a=anim, r=row: a.start(r), min(i, 12) * 0.05)
-            rows.add_widget(row)
+        for p in shown:
+            rows.add_widget(ServerRow(p))
         if not shown:
             rows.add_widget(Label(text="Nothing here yet.", size_hint_y=None, height=dp(80),
-                                  color=self.t_muted, font_size=dp(14)))
+                                  color=(0.42, 0.47, 0.60, 1), font_size=dp(14)))
 
     def _best(self):
         return self.working[0] if self.working else None
@@ -926,96 +864,32 @@ class AmizooApp(App):
         self.status_text = "Ping updated: %d servers answered." % len(self.working)
 
     # ================================================================== settings / port filter
-    def _read_settings(self):
-        try:
-            with open(self.settings_path, encoding="utf-8") as f:
-                d = json.load(f)
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            return {}
-
-    def _save_settings(self):
-        try:
-            with open(self.settings_path, "w", encoding="utf-8") as f:
-                json.dump(self.settings, f)
-        except OSError:
-            pass
-
     def _load_settings(self):
         try:
-            port = int(self.settings.get("port") or 0)
-        except (ValueError, TypeError):
-            port = 0
-        self.set_port(port if 1 <= port <= 65535 else None, save=False)
-
-    def set_theme(self, key, animate=True, save=True):
-        if key not in THEMES:
-            key = "light"
-        self.theme_name = key
-        vals = {"t_" + k: list(THEMES[key][k]) for k in ("bg", "surf", "surf2", "line", "txt", "muted", "acc", "acc_dn")}
-        if animate:
-            Animation.cancel_all(self)
-            Animation(d=0.45, t="out_quad", **vals).start(self)
-        else:
-            for k, v in vals.items():
-                setattr(self, k, v)
-        if save:
-            self.settings["theme"] = key
-            self._save_settings()
-        if animate:
-            self._tick(0)
-
-    def _enter_home(self):
-        self.root.transition = FadeTransition(duration=0.55)
-        self.root.current = "home"
-        self.seen_rows.clear()
-        self._refresh_list()
-
-    def _go(self, name, direction):
-        self.root.transition = SlideTransition(direction=direction, duration=0.28)
-        self.root.current = name
-
-    def open_theme_dialog(self):
-        mv = ModalView(size_hint=(0.9, None), height=dp(430), background="", background_color=(0.05, 0.08, 0.16, 0.45))
-        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10))
-        card.add_widget(Factory.TitleLabel(text="Choose a theme"))
-        grid = GridLayout(cols=2, spacing=dp(10), size_hint_y=None, height=dp(3 * 84 + 20))
-        sw = {}
-
-        def pick(key):
-            self.set_theme(key)
-            for k, w in sw.items():
-                w.selected = k == key
-
-        for key in THEMES:
-            w = ThemeSwatch(key, selected=key == self.theme_name)
-            w.bind(on_release=lambda _w, k=key: pick(k))
-            sw[key] = w
-            grid.add_widget(w)
-        card.add_widget(grid)
-        done = PillButton(text="Done", size_hint_y=None, height=dp(46))
-        done.bind(on_release=mv.dismiss)
-        card.add_widget(done)
-        mv.add_widget(card)
-        mv.open()
+            with open(self.settings_path, encoding="utf-8") as f:
+                port = int(json.load(f).get("port") or 0)
+            self.set_port(port if 1 <= port <= 65535 else None, save=False)
+        except (OSError, ValueError, TypeError, AttributeError):
+            self.set_port(None, save=False)
 
     def set_port(self, port, save=True):
         self.port_filter = port
         self.port_text = str(port) if port else "any"
         if save:
-            self.settings["port"] = port or 0
-            self._save_settings()
+            try:
+                with open(self.settings_path, "w", encoding="utf-8") as f:
+                    json.dump({"port": port or 0}, f)
+            except OSError:
+                pass
 
     def open_port_dialog(self):
         mv = ModalView(size_hint=(0.88, None), height=dp(250), background="", background_color=(0.05, 0.08, 0.16, 0.45))
-        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10))
+        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10), bg=[1, 1, 1, 1])
         card.add_widget(Label(text="SOCKS5 / HTTP port (freeproxy.world)", font_size=dp(15), bold=True,
-                              color=self.t_txt, size_hint_y=None, height=dp(28)))
+                              color=(0.09, 0.12, 0.22, 1), size_hint_y=None, height=dp(28)))
         box = TextInput(text=str(self.port_filter or ""), hint_text="e.g. 8080   (empty = any port)", multiline=False,
                         input_filter="int", input_type="number", font_size=dp(18), size_hint_y=None, height=dp(48),
-                        padding=(dp(12), dp(12)), background_normal="", background_active="",
-                        background_color=self.t_surf2, foreground_color=self.t_txt, hint_text_color=self.t_muted,
-                        cursor_color=self.t_acc)
+                        padding=(dp(12), dp(12)))
         card.add_widget(box)
         msg = Label(text="", font_size=dp(12), color=(0.90, 0.25, 0.30, 1), size_hint_y=None, height=dp(20))
         card.add_widget(msg)
@@ -1047,10 +921,9 @@ class AmizooApp(App):
 
     # ================================================================== menu
     def open_menu(self):
-        mv = ModalView(size_hint=(0.9, None), height=dp(560), background="", background_color=(0.05, 0.08, 0.16, 0.45))
-        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10))
-        items = (("Theme / appearance", self.open_theme_dialog),
-                 ("Port for SOCKS5/HTTP:  %s" % self.port_text, self.open_port_dialog),
+        mv = ModalView(size_hint=(0.9, None), height=dp(500), background="", background_color=(0.05, 0.08, 0.16, 0.45))
+        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10), bg=[1, 1, 1, 1])
+        items = (("Port for SOCKS5/HTTP:  %s" % self.port_text, self.open_port_dialog),
                  ("Paste a list from the clipboard", lambda: self.scan(True)),
                  ("Re-ping all servers", self.reping),
                  ("Copy Telegram proxy links", lambda: self.copy_all("tg")),
@@ -1060,9 +933,9 @@ class AmizooApp(App):
             b = GhostButton(text=text, size_hint_y=None, height=dp(46))
             b.bind(on_release=lambda *_, f=fn: (mv.dismiss(), f()))
             card.add_widget(b)
-        note = Label(text="SOCKS5/HTTP: freeproxy.world only.  V2Ray: Iranian collectors + public lists, verified with Xray.\n"
+        note = Label(text="SOCKS5/HTTP: freeproxy.world only.  V2Ray: only your subscription link (Amin01, 02, ...), verified with Xray.\n"
                           "Ping is measured by this phone. Free proxies can read unencrypted traffic.",
-                     font_size=dp(11), color=self.t_muted, halign="center")
+                     font_size=dp(11), color=(0.42, 0.47, 0.60, 1), halign="center")
         note.bind(size=lambda w, s: setattr(w, "text_size", (s[0], None)))
         card.add_widget(note)
         mv.add_widget(card)
@@ -1083,16 +956,16 @@ class AmizooApp(App):
             c.title_text += "  (%s)" % proxy.country
         self._last_rx = self._last_tx = 0
         self._last_tick, self._last_ping, self._direct = time.time(), 0.0, None
-        self._go("conn", "left")
+        self.root.current = "conn"
         self.engine.connect(proxy)
         self._tick(0)
 
     def open_conn(self):
         if self.current:
-            self._go("conn", "left")
+            self.root.current = "conn"
 
     def back_home(self):
-        self._go("home", "right")                                  # a running VPN stays on
+        self.root.current = "home"                                 # a running VPN stays on
 
     def toggle_connection(self):
         if self.engine.state in ("starting", "running"):
@@ -1156,16 +1029,16 @@ class AmizooApp(App):
             self._last_rx = self._last_tx = 0
             if st != "starting":
                 c.down_text = c.up_text = "0 B/s"
-        label, ring = {"stopped": ("Disconnected", list(self.t_acc)), "starting": ("Connecting...", AMBER),
+        label, ring = {"stopped": ("Disconnected", BLUE), "starting": ("Connecting...", AMBER),
                        "running": ("Connected", GREEN), "error": ("Failed", RED)}.get(st, ("...", GREY))
-        c.ring = list(self.t_acc) if st == "stopped" else ring
+        c.ring = BLUE if st == "stopped" else ring
         c.busy = st == "starting"
         if self.scanning and st != "running":
             self.hero_text, self.hero_color, self.hero_busy = "Finding servers...", AMBER, True
         else:
-            self.hero_text, self.hero_color = {"stopped": ("Tap to connect", list(self.t_acc)), "starting": ("Connecting...", AMBER),
+            self.hero_text, self.hero_color = {"stopped": ("Tap to connect", BLUE), "starting": ("Connecting...", AMBER),
                                                "running": ("Connected", GREEN), "error": ("Connection failed", RED)}.get(
-                st, ("Tap to connect", list(self.t_acc)))
+                st, ("Tap to connect", BLUE))
             self.hero_busy = st == "starting"
         if st in ("starting", "running"):
             self.hero_sub = c.title_text if st == "starting" else "%s  -  %s" % (c.title_text, fmt_time(s["uptime"]))
