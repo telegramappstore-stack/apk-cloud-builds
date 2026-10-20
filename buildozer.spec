@@ -21,7 +21,7 @@ android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.add_src = java
 android.add_libs_arm64_v8a = libs/arm64-v8a/*.so
-p4a.branch = v2024.01.21
+p4a.branch = master
 
 [buildozer]
 log_level = 2
