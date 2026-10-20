@@ -205,10 +205,9 @@ def build_config(p, legacy=False, local_port=LOCAL_PORT, log_level="warning", ht
         # QUIC (UDP 443) through a TCP-based proxy is slow: blocking it makes apps fall back to normal TCP at once
         "routing": {"domainStrategy": "AsIs", "rules": [{"type": "field", "network": "udp", "port": "443", "outboundTag": "block"}]},
     }
-    if share:                                       # SOCKS5 for other devices (hotspot / same Wi-Fi), password protected
+    if share:                                       # SOCKS5 for other devices (hotspot / same Wi-Fi), no user/password
         cfg["inbounds"].append({"tag": "share-in", "listen": "0.0.0.0", "port": share["port"], "protocol": "socks",
-                                "settings": {"auth": "password", "udp": True, "ip": share.get("ip") or "127.0.0.1",
-                                             "accounts": [{"user": share["user"], "pass": share["pw"]}]}})
+                                "settings": {"auth": "noauth", "udp": True, "ip": share.get("ip") or "127.0.0.1"}})
     if http_port:                                   # local HTTP proxy too (Psiphon's upstream proxy wants HTTP)
         cfg["inbounds"].append({"tag": "http-in", "listen": "127.0.0.1", "port": http_port, "protocol": "http",
                                 "settings": {}})
