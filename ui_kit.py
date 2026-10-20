@@ -92,12 +92,21 @@ class SplashScreen(Screen):
         self._grad.blit_buffer(bytes([56, 30, 115, 255, 13, 18, 46, 255]), colorfmt="rgba", bufferfmt="ubyte")
         self._grad.mag_filter = "linear"
         self._parts = [(random.random(), random.uniform(0.05, 0.14), random.uniform(3, 8), random.random())
-                       for _ in range(18)]
+                       for _ in range(12)]
         fl = FloatLayout()
         self.add_widget(fl)
         self.bg = Widget()                       # own canvas: a Screen's canvas.before must never be cleared
         fl.add_widget(self.bg)
-        self.logo = Image(source=LOGO, mipmap=True, size_hint=(None, None), size=(dp(30), dp(30)), opacity=0,
+        with self.bg.canvas:                     # built ONCE; every frame only updates these instructions
+            Color(1, 1, 1, 1)
+            self._rect = Rectangle(texture=self._grad)
+            self._rings = [(Color(1, 1, 1, 0), Line(circle=(0, 0, 1), width=dp(1.6))) for _ in range(3)]
+            self._dots = [(Color(1, 1, 1, 0), Ellipse(size=(dp(p[2]), dp(p[2])))) for p in self._parts]
+            self._c_track = Color(1, 1, 1, 0)
+            self._track = RoundedRectangle(radius=[dp(2.5)])
+            self._c_fill = Color(1, 1, 1, 0)
+            self._fill = RoundedRectangle(radius=[dp(2.5)])
+        self.logo = Image(source=LOGO, mipmap=True, size_hint=(None, None), size=(dp(124), dp(124)), opacity=1,
                           pos_hint={"center_x": .5, "center_y": .6})
         fl.add_widget(self.logo)
         row = BoxLayout(size_hint=(None, None), size=(dp(34) * len(self.TITLE), dp(64)),
@@ -118,7 +127,7 @@ class SplashScreen(Screen):
     # -- timeline
     def start(self, on_done):
         self._cb, self._started = on_done, time.time()
-        self._ev = Clock.schedule_interval(self._frame, 1 / 45.0)
+        self._ev = Clock.schedule_interval(self._frame, 1 / 30.0)
         Clock.schedule_once(self._pop_logo, 0.15)
         for i, lab in enumerate(self.letters):
             Clock.schedule_once(lambda dt, l=lab: Animation(
@@ -129,12 +138,8 @@ class SplashScreen(Screen):
         Clock.schedule_once(self.finish, 3.8)
 
     def _pop_logo(self, *_):
-        Animation(size=(dp(124), dp(124)), opacity=1, d=0.85, t="out_back").start(self.logo)
-        hi = {"center_x": .5, "center_y": .615}
-        lo = {"center_x": .5, "center_y": .60}
-        float_ = Animation(pos_hint=hi, d=1.3, t="in_out_sine") + Animation(pos_hint=lo, d=1.3, t="in_out_sine")
-        float_.repeat = True
-        Clock.schedule_once(lambda dt: float_.start(self.logo), 1.0)
+        big, base = (dp(140), dp(140)), (dp(124), dp(124))
+        (Animation(size=big, d=0.35, t="out_quad") + Animation(size=base, d=0.55, t="out_back")).start(self.logo)
 
     def _next_tag(self, *_):
         self.tag.value = self.TAGS[min(self._tag_i, len(self.TAGS) - 1)]
@@ -169,29 +174,23 @@ class SplashScreen(Screen):
             return
         x0, y0 = self.bg.pos
         t = self._t
-        ring_gain = min(1.0, t / 1.0)
-        bar_gain = min(1.0, max(0.0, (t - 0.2) / 0.5))
+        self._rect.pos, self._rect.size = (x0, y0), (w, h)
+        gain = min(1.0, t / 1.0)
         cx, cy = x0 + w * .5, y0 + h * .6
-        cv = self.bg.canvas
-        cv.clear()
-        with cv:
-            Color(1, 1, 1, 1)
-            Rectangle(texture=self._grad, pos=self.bg.pos, size=self.bg.size)
-            for k in range(3):
-                ph = (t * 0.45 + k / 3.0) % 1.0
-                Color(1, 1, 1, 0.22 * (1 - ph) * ring_gain)
-                Line(circle=(cx, cy, dp(62) + ph * min(w, h) * 0.62), width=dp(1.6))
-            for fx, spd, size, off in self._parts:
-                y = (t * spd + off) % 1.0
-                Color(1, 1, 1, 0.30 * math.sin(math.pi * y))
-                d = dp(size)
-                Ellipse(pos=(x0 + fx * w + math.sin(t + off * 9) * dp(10), y0 + y * h), size=(d, d))
-            bw, bh = w * .5, dp(5)
-            bx, by = x0 + (w - bw) / 2, y0 + h * .14
-            Color(1, 1, 1, 0.25 * bar_gain)
-            RoundedRectangle(pos=(bx, by), size=(bw, bh), radius=[bh / 2])
-            Color(1, 1, 1, 0.95 * bar_gain)
-            RoundedRectangle(pos=(bx, by), size=(max(bh, bw * self.progress), bh), radius=[bh / 2])
+        for k, (col, line) in enumerate(self._rings):
+            ph = (t * 0.45 + k / 3.0) % 1.0
+            col.a = 0.22 * (1 - ph) * gain
+            line.circle = (cx, cy, dp(62) + ph * min(w, h) * 0.62)
+        for (fx, spd, size, off), (col, dot) in zip(self._parts, self._dots):
+            y = (t * spd + off) % 1.0
+            col.a = 0.30 * math.sin(math.pi * y)
+            dot.pos = (x0 + fx * w + math.sin(t + off * 9) * dp(10), y0 + y * h)
+        bg_ = min(1.0, max(0.0, (t - 0.2) / 0.5))
+        bw, bh = w * .5, dp(5)
+        bx, by = x0 + (w - bw) / 2, y0 + h * .14
+        self._c_track.a, self._c_fill.a = 0.25 * bg_, 0.95 * bg_
+        self._track.pos, self._track.size = (bx, by), (bw, bh)
+        self._fill.pos, self._fill.size = (bx, by), (max(bh, bw * self.progress), bh)
 
 
 # ---------------------------------------------------------------------------------- theme swatch
