@@ -20,36 +20,10 @@ TEST_TARGET = ("www.gstatic.com", 80, "/generate_204")
 
 # SOCKS5 / HTTP proxies come ONLY from freeproxy.world (see fetch_freeproxy_world below).
 #
-# V2Ray configs: every entry below is a GROUP of mirrors of the same list. ALL groups are downloaded in
-# parallel and merged (one dead source no longer matters); inside a group the first mirror that answers wins.
-# Iranian-made collectors come first: they harvest the configs that Iranian Telegram channels publish every
-# few minutes, and some of them test the configs before publishing (a much higher share of them connect).
-def _gh(repo, path, branch="main"):
-    return ("https://raw.githubusercontent.com/%s/%s/%s" % (repo, branch, path),
-            "https://cdn.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path),
-            "https://fastly.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path),
-            "https://gcore.jsdelivr.net/gh/%s@%s/%s" % (repo, branch, path))
-
-
-SOURCES = {
-    "v2ray": [
-        # --- Iranian collectors (Telegram channels -> subscriptions)
-        _gh("hamedcode/port-based-v2ray-configs", "top100.txt"),            # liveness-tested, fastest first
-        _gh("yebekhe/TVC", "subscriptions/xray/normal/mix"),
-        _gh("yebekhe/TelegramV2rayCollector", "sub/normal/mix"),
-        _gh("soroushmirzaei/telegram-configs-collector", "protocols/reality"),
-        _gh("soroushmirzaei/telegram-configs-collector", "protocols/vless"),
-        _gh("soroushmirzaei/telegram-configs-collector", "protocols/vmess"),
-        _gh("soroushmirzaei/telegram-configs-collector", "protocols/trojan"),
-        _gh("soroushmirzaei/telegram-configs-collector", "protocols/shadowsocks"),
-        _gh("barry-far/V2ray-Configs", "All_Configs_Sub.txt"),
-        _gh("Epodonios/v2ray-configs", "All_Configs_Sub.txt"),
-        _gh("Delta-Kronecker/V2ray-Config", "config/batches/v2ray/batch_001.txt"),
-        _gh("mahdibland/V2RayAggregator", "sub/sub_merge.txt", "master"),
-    ],
-}
-V2_PER_SOURCE = 1500            # cap per list so one huge file cannot crowd out the others
-CACHE_FILE = None               # set by the app: last good V2Ray list, used when every source is unreachable
+# V2Ray configs come ONLY from this single subscription link (a BPB panel, "raw" list for Xray).
+V2_SUB_URL = "https://qv2zt7gqgnlgdfg-7vtb1.pages.dev/trqN0NacQe7dAav/sub/raw?app=xray"
+V2_NAME_PREFIX = "Amin"          # every config is shown as Amin01, Amin02, ...
+CACHE_FILE = None                # set by the app: last good list, used when the link is unreachable
 
 
 class Proxy:
@@ -202,22 +176,6 @@ def fetch_freeproxy_world(kind, log=lambda m: None, stop=None, pages=_FPW_PAGES,
     return out
 
 
-def _fetch_group(mirrors, stop):
-    """First mirror of the group that answers -> (name, [Proxy]) or (name, None)."""
-    parts = mirrors[0].split("/")
-    name = "%s/%s" % (parts[3], parts[4]) if len(parts) > 4 else parts[2]
-    for url in mirrors:
-        if stop is not None and stop.is_set():
-            break
-        try:
-            items = parse_v2ray(fetch_text(url, timeout=20))
-            if items:
-                return name, items
-        except Exception:
-            continue
-    return name, None
-
-
 def _load_cache():
     if not CACHE_FILE:
         return []
@@ -238,33 +196,37 @@ def _save_cache(items):
         pass
 
 
+def _name_all(items):
+    for i, p in enumerate(items, 1):
+        p.name = "%s%02d" % (V2_NAME_PREFIX, i)
+    return items
+
+
 def fetch_v2ray(log=lambda m: None, stop=None):
-    """Download every V2Ray source in parallel and merge them (the order of SOURCES = priority)."""
-    groups = SOURCES["v2ray"]
-    results = [None] * len(groups)
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = {ex.submit(_fetch_group, g, stop): i for i, g in enumerate(groups)}
-        for f in as_completed(futs):
-            i = futs[f]
-            try:
-                name, items = f.result()
-            except Exception:
-                continue
-            results[i] = items
-            log("%s: %s" % (name, ("%d configs" % len(items)) if items else "unreachable"))
-    out, seen = [], set()
-    for items in results:
-        for p in (items or [])[:V2_PER_SOURCE]:
-            if p.link not in seen:
-                seen.add(p.link)
-                out.append(p)
-    if out:
-        _save_cache(out)
-    else:
-        out = _load_cache()
-        if out:
-            log("All sources unreachable - using the last saved list (%d configs)." % len(out))
-    return out
+    """Download the one subscription link (3 tries) and number the configs Amin01, Amin02, ..."""
+    items, err = [], ""
+    for n in range(3):
+        if stop is not None and stop.is_set():
+            return []
+        try:
+            items = parse_v2ray(fetch_text(V2_SUB_URL, timeout=25))
+            if items:
+                break
+            err = "the link returned no configs"
+        except Exception as e:
+            err = type(e).__name__
+        time.sleep(1.0)
+    if items:
+        _name_all(items)
+        _save_cache(items)
+        log("V2Ray subscription: %d configs" % len(items))
+        return items
+    items = _load_cache()
+    if items:
+        log("V2Ray subscription unreachable (%s) - using the last saved list (%d configs)." % (err, len(items)))
+        return _name_all(items)
+    log("V2Ray subscription unreachable (%s)." % err)
+    return []
 
 
 def fetch_candidates(kinds, log=lambda m: None, stop=None, port=None):
@@ -293,10 +255,8 @@ def pick_sample(cands, limit):
     per = max(1, limit // max(1, len(by)))
     out = []
     for kind, lst in by.items():
-        if kind == "v2ray":                       # head of the list = best (Iranian / tested) sources
-            head, rest = lst[:per // 2], lst[per // 2:]
-            random.shuffle(rest)
-            out += head + rest[:per - len(head)]
+        if kind == "v2ray":                       # one small subscription: keep its order (Amin01, Amin02, ...)
+            out += lst[:per]
         else:
             random.shuffle(lst)
             out += lst[:per]
