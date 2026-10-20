@@ -80,6 +80,20 @@ public class ProxyVpnService extends VpnService {
         super.onCreate();
         stateFile = new File(getFilesDir(), "vpn_state.txt");
         logFile = new File(getFilesDir(), "vpn_xray.log");
+        final File crash = new File(getFilesDir(), "vpn_crash.txt");
+        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            public void uncaughtException(Thread th, Throwable ex) {
+                try {                                       // Python shows this instead of a silent timeout
+                    java.io.StringWriter sw = new java.io.StringWriter();
+                    ex.printStackTrace(new java.io.PrintWriter(sw));
+                    FileOutputStream o = new FileOutputStream(crash);
+                    o.write(sw.toString().getBytes(StandardCharsets.UTF_8));
+                    o.close();
+                } catch (Throwable ignored) { }
+                if (prev != null) prev.uncaughtException(th, ex);
+            }
+        });
     }
 
     @Override
@@ -352,7 +366,7 @@ public class ProxyVpnService extends VpnService {
             }
             Notification.Builder nb = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);
             nb.setContentTitle("ProxyScout VPN").setContentText("Tap to open").setOngoing(true)
-                    .setSmallIcon(getApplicationInfo().icon);
+                    .setSmallIcon(android.R.drawable.ic_lock_lock);   // NOT the app icon: an adaptive icon is an invalid small icon and kills the service process
             try {
                 Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
                 if (open != null) {
