@@ -9,7 +9,9 @@ writes the flat layout, build_config(legacy=True) the older vnext/servers layout
 import base64
 import json
 import socket
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
 LOCAL_PORT = 10808
 
@@ -24,8 +26,22 @@ def _b64d(s):
     return base64.b64decode(s).decode("utf-8", "ignore")
 
 
-def _resolve(host):
-    """Resolve here (the app is outside the VPN) so the Xray binary never needs DNS for the server address."""
+def _fastest(ips, port):
+    """TCP-connect every address of the server name at once and keep the quickest one."""
+    def probe(ip):
+        t = time.time()
+        try:
+            socket.create_connection((ip, port), 2.0).close()
+            return time.time() - t, ip
+        except OSError:
+            return 99.0, ip
+    with ThreadPoolExecutor(max_workers=min(8, len(ips))) as ex:
+        return min(ex.map(probe, ips[:8]))[1]
+
+
+def _resolve(host, port=443, best=False):
+    """Resolve here (the app is outside the VPN) so the Xray binary never needs DNS for the server address.
+    best=True: a name with several addresses (CDNs) gets the one that answers fastest from this phone."""
     try:
         socket.inet_pton(socket.AF_INET, host)
         return host
@@ -34,9 +50,13 @@ def _resolve(host):
     if ":" in host:
         return host
     try:
-        return socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
     except OSError:
         return host
+    ips = list(dict.fromkeys(i[4][0] for i in infos))
+    if best and len(ips) > 1:
+        return _fastest(ips, int(port))
+    return ips[0] if ips else host
 
 
 def _truthy(v):
@@ -102,6 +122,7 @@ def _stream(L, orig_host):
             t["alpn"] = [a for a in L["alpn"].split(",") if a]
         if L.get("fp"):
             t["fingerprint"] = L["fp"]
+        t.setdefault("fingerprint", "chrome")                  # uTLS: Go's own TLS hello is easy to throttle
         s["tlsSettings"] = t
     elif sec == "reality":
         s["realitySettings"] = {"serverName": L.get("sni") or orig_host, "fingerprint": L.get("fp") or "chrome",
@@ -142,7 +163,7 @@ def _endpoint(proto, addr, port, body, legacy):
     return {"servers": [dict(address=addr, port=port, **body)]}
 
 
-def outbound(p, legacy=False):
+def outbound(p, legacy=False, best=False):
     if p.kind == "socks5":
         return {"tag": "proxy", "protocol": "socks", "settings": _endpoint("socks", p.host, p.port, {}, legacy)}
     if p.kind == "http":
@@ -151,7 +172,7 @@ def outbound(p, legacy=False):
         raise ConfigError("nothing to connect to")
     L = parse_link(p.link)
     orig = L["address"]
-    addr = _resolve(orig)
+    addr = _resolve(orig, L["port"], best)
     proto = L["proto"]
     if proto == "vless":
         body = {"id": L["id"], "encryption": L.get("enc") or "none", "level": 0}
@@ -174,15 +195,20 @@ def outbound(p, legacy=False):
     return ob
 
 
-def build_config(p, legacy=False, local_port=LOCAL_PORT, log_level="warning", http_port=None):
+def build_config(p, legacy=False, local_port=LOCAL_PORT, log_level="warning", http_port=None, share=None):
     cfg = {
         "log": {"loglevel": log_level},
         "inbounds": [{"tag": "socks-in", "listen": "127.0.0.1", "port": local_port, "protocol": "socks",
                       "settings": {"auth": "noauth", "udp": True, "ip": "127.0.0.1"}}],
-        "outbounds": [outbound(p, legacy), {"tag": "direct", "protocol": "freedom"},
+        "outbounds": [outbound(p, legacy, best=True), {"tag": "direct", "protocol": "freedom"},
                       {"tag": "block", "protocol": "blackhole"}],
-        "routing": {"domainStrategy": "AsIs", "rules": []},
+        # QUIC (UDP 443) through a TCP-based proxy is slow: blocking it makes apps fall back to normal TCP at once
+        "routing": {"domainStrategy": "AsIs", "rules": [{"type": "field", "network": "udp", "port": "443", "outboundTag": "block"}]},
     }
+    if share:                                       # SOCKS5 for other devices (hotspot / same Wi-Fi), password protected
+        cfg["inbounds"].append({"tag": "share-in", "listen": "0.0.0.0", "port": share["port"], "protocol": "socks",
+                                "settings": {"auth": "password", "udp": True, "ip": share.get("ip") or "127.0.0.1",
+                                             "accounts": [{"user": share["user"], "pass": share["pw"]}]}})
     if http_port:                                   # local HTTP proxy too (Psiphon's upstream proxy wants HTTP)
         cfg["inbounds"].append({"tag": "http-in", "listen": "127.0.0.1", "port": http_port, "protocol": "http",
                                 "settings": {}})
