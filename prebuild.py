@@ -28,6 +28,7 @@ HEV_TAGS = os.environ.get("HEV_TAGS", "2.17.1,").split(",")               # '' =
 SERVICE_XML = """
         <service android:name="org.proxyscout.vpn.ProxyVpnService"
                  android:permission="android.permission.BIND_VPN_SERVICE"
+                 android:process=":vpn"
                  android:exported="true">
             <intent-filter>
                 <action android:name="android.net.VpnService" />
