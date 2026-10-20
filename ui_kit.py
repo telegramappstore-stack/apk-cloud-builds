@@ -95,6 +95,8 @@ class SplashScreen(Screen):
                        for _ in range(18)]
         fl = FloatLayout()
         self.add_widget(fl)
+        self.bg = Widget()                       # own canvas: a Screen's canvas.before must never be cleared
+        fl.add_widget(self.bg)
         self.logo = Image(source=LOGO, mipmap=True, size_hint=(None, None), size=(dp(30), dp(30)), opacity=0,
                           pos_hint={"center_x": .5, "center_y": .6})
         fl.add_widget(self.logo)
@@ -162,19 +164,19 @@ class SplashScreen(Screen):
     # -- background: gradient, expanding rings, floating particles, progress bar
     def _frame(self, dt):
         self._t += dt
-        w, h = self.size
-        if not w:
+        w, h = self.bg.size
+        if not w or not h:
             return
-        x0, y0 = self.pos
+        x0, y0 = self.bg.pos
         t = self._t
         ring_gain = min(1.0, t / 1.0)
         bar_gain = min(1.0, max(0.0, (t - 0.2) / 0.5))
         cx, cy = x0 + w * .5, y0 + h * .6
-        cv = self.canvas.before
+        cv = self.bg.canvas
         cv.clear()
         with cv:
             Color(1, 1, 1, 1)
-            Rectangle(texture=self._grad, pos=self.pos, size=self.size)
+            Rectangle(texture=self._grad, pos=self.bg.pos, size=self.bg.size)
             for k in range(3):
                 ph = (t * 0.45 + k / 3.0) % 1.0
                 Color(1, 1, 1, 0.22 * (1 - ph) * ring_gain)
