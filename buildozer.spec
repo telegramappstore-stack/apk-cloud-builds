@@ -5,7 +5,7 @@ package.domain = org.proxyscout
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,java
 version = 1.2
-requirements = python3,kivy==2.3.0,certifi,engine,xraytest
+requirements = python3,kivy==2.3.0,certifi
 orientation = portrait
 icon.filename = %(source.dir)s/icon.png
 icon.adaptive_foreground.filename = %(source.dir)s/icon_fg.png
