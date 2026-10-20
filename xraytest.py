@@ -59,12 +59,20 @@ def _wait_port(port, proc, timeout):
     return False
 
 
-def _launch(xray, cfg, first_port):
+def _nice():
+    try:
+        os.nice(10)
+    except Exception:
+        pass
+
+
+def _launch(xray, cfg, first_port, low=False):
     """Start Xray with cfg; (proc, None) when it listens, (None, output) when it died / never listened."""
     fd, path = tempfile.mkstemp(suffix=".json", prefix="xr")
     with os.fdopen(fd, "w") as f:
         json.dump(cfg, f)
-    proc = subprocess.Popen([xray, "run", "-c", path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=_env())
+    extra = {"preexec_fn": _nice} if (low and hasattr(os, "nice")) else {}              # scans must not starve the UI
+    proc = subprocess.Popen([xray, "run", "-c", path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=_env(), **extra)
     ok = _wait_port(first_port, proc, 5.0)
     if ok:
         return proc, None
@@ -95,7 +103,7 @@ def _batch(xray, group, legacy, stop, timeout, base_port):
     res = [None] * len(group)
     if not live:
         return res
-    proc, err = _launch(xray, cfg, live[0][1])
+    proc, err = _launch(xray, cfg, live[0][1], low=True)
     if proc is None:
         return None
     try:
@@ -108,7 +116,7 @@ def _batch(xray, group, legacy, stop, timeout, base_port):
                 return i, None
             b = pc.check_socks5("127.0.0.1", port, timeout)          # 2nd request: connection already warm
             return i, min(a, b) if b is not None else a
-        with ThreadPoolExecutor(max_workers=16) as ex:
+        with ThreadPoolExecutor(max_workers=min(10, len(live))) as ex:
             for i, ms in ex.map(one, live):
                 res[i] = ms
     finally:
