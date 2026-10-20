@@ -163,6 +163,13 @@ KV = r"""
         pos_hint: {'center_y': .5}
         text: root.ping_text
         bg: root.ping_bg
+    PillButton:
+        size_hint: None, None
+        size: dp(54), dp(30)
+        pos_hint: {'center_y': .5}
+        text: 'Ping'
+        font_size: sp(12)
+        on_release: root.ping_one()
 
 <SpeedGraph>:
     surf: app.t_surf
@@ -560,6 +567,9 @@ class SpeedGraph(Widget):
                     Line(points=pts, width=dp(1.8))
 
 
+FAILED = set()          # id(proxy) of servers whose last single ping failed (they stay in the list)
+
+
 class ServerRow(ButtonBehavior, Card):
     title = StringProperty("")
     subtitle = StringProperty("")
@@ -585,9 +595,15 @@ class ServerRow(ButtonBehavior, Card):
             self.subtitle = ("SOCKS5" if proxy.kind == "socks5" else "HTTP") + where
             self.ping_text = ("%d ms" % ms) if ms else "-"
             good = ms
-        self.ping_bg = [0.62, 0.66, 0.76, 1] if not good else ([0.10, 0.68, 0.42, 1] if ms < 500 else
+        if id(proxy) in FAILED:
+            self.ping_text, good = "timeout", False
+        self.ping_bg = [0.85, 0.27, 0.27, 1] if id(proxy) in FAILED else [0.62, 0.66, 0.76, 1] if not good else ([0.10, 0.68, 0.42, 1] if ms < 500 else
                                                                [0.90, 0.62, 0.05, 1] if ms < 1200 else [0.90, 0.45, 0.15, 1])
         self.bind(on_release=lambda *_: App.get_running_app().connect_to(self.proxy))
+
+    def ping_one(self):
+        self.ping_text, self.ping_bg = "...", [0.62, 0.66, 0.76, 1]
+        App.get_running_app().ping_one(self.proxy)
 
 
 class ConnScreen(Screen):
@@ -958,25 +974,67 @@ class AmizooApp(App):
                 if v2:
                     xt.real_delay_many(v2, evt, lambda p, ms: self._ui(self._repinged_v2, p, ms))
                 if simple:
-                    pc.ping_many(simple, lambda p, r: self._ui(self._pinged, p, r), evt, samples=3, workers=16)
+                    pc.ping_many(simple, lambda p, r: self._ui(self._repinged_simple, p, r), evt, samples=3, workers=16)
             finally:
                 self._ui(self._reping_done)
         threading.Thread(target=work, daemon=True).start()
 
     def _repinged_v2(self, p, ms):
         if ms is None:
-            if p in self.working:
-                self.working.remove(p)
+            FAILED.add(id(p))                                   # shown as "timeout", never deleted from the list
         else:
+            FAILED.discard(id(p))
             p.ms, p.ok_real = ms, True
         self.working.sort(key=_sort_key)
+        self._refresh()
+
+    def _repinged_simple(self, p, r):
+        p.tcp = r["tcp"]
+        if r["ms"] is None:
+            FAILED.add(id(p))
+        else:
+            FAILED.discard(id(p))
+            p.ms = r["ms"]
+        self.working.sort(key=_sort_key)
+        self._refresh()
+
+    def ping_one(self, p):
+        """Ping ONE server (the Ping button on its row). A server that does not answer stays in the list."""
+        evt = threading.Event()
+        got = []
+
+        def work():
+            try:
+                if p.kind == "v2ray" and self.xray_ok:
+                    xt.real_delay_many([p], evt, lambda q, ms: got.append(ms))
+                    ms = got[0] if got else None
+                else:
+                    pc.ping_many([p], lambda q, r: got.append(r["ms"]), evt, samples=3, workers=1)
+                    ms = got[0] if got else None
+            except Exception:
+                ms = None
+            self._ui(self._one_done, p, ms)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _one_done(self, p, ms):
+        if ms is None:
+            FAILED.add(id(p))
+            self.status_text = "%s: no answer (kept in the list)." % (p.name or p.addr)
+        else:
+            FAILED.discard(id(p))
+            p.ms = ms
+            if p.kind == "v2ray":
+                p.ok_real = True
+            self.status_text = "%s: %d ms" % (p.name or p.addr, ms)
+        if self.working:
+            pc.save_results(self.cache_path, self.working)
         self._refresh()
 
     def _reping_done(self):
         self.ping_busy = False
         if self.working:
             pc.save_results(self.cache_path, self.working)
-        self.status_text = "Ping updated: %d servers answered." % len(self.working)
+        self.status_text = "Ping updated: %d of %d servers answered." % (sum(1 for x in self.working if id(x) not in FAILED), len(self.working))
 
     # ================================================================== settings / port filter
     def _read_settings(self):
@@ -1125,28 +1183,33 @@ class AmizooApp(App):
 
     # ================================================================== share the connection with other devices
     def _load_share(self):
-        import secrets
         d = self.settings.get("share") or {}
         en.SHARE["on"] = bool(d.get("on"))
-        en.SHARE["pw"] = d.get("pw") or secrets.token_hex(4)
         try:
             en.SHARE["port"] = int(d.get("port") or 10809)
         except (ValueError, TypeError):
             en.SHARE["port"] = 10809
-        self.settings["share"] = {"on": en.SHARE["on"], "pw": en.SHARE["pw"], "port": en.SHARE["port"]}
+        self.settings["share"] = {"on": en.SHARE["on"], "port": en.SHARE["port"]}
 
     def open_share_dialog(self):
         s = en.SHARE
         ips = en.lan_ips()
-        ip = ips[0][1] if ips else "(no hotspot / Wi-Fi address found)"
-        mv = ModalView(size_hint=(0.92, None), height=dp(470), background="", background_color=(0.05, 0.08, 0.16, 0.45))
+        ip = ips[0][1] if ips else None
+        live = ip is not None and en.share_listening(ip)
+        mv = ModalView(size_hint=(0.92, None), height=dp(450), background="", background_color=(0.05, 0.08, 0.16, 0.45))
         card = Card(orientation="vertical", padding=dp(16), spacing=dp(8))
-        info = ("Other devices connect to this SOCKS5 proxy:\n\n"
-                "Address:  %s\nPort:  %d\nUser:  %s\nPassword:  %s\n\n"
-                "1) Turn ON the phone hotspot (or join the same Wi-Fi).\n"
-                "2) Connect the VPN here.\n"
-                "3) On the other device set a SOCKS5 proxy with the values above.%s"
-                % (ip, s["port"], s["user"], s["pw"],
+        if ip is None:
+            state = "No hotspot / Wi-Fi address found. Turn the phone hotspot ON first."
+        elif live:
+            state = "READY - the proxy is listening."
+        elif s["on"]:
+            state = "Sharing is ON but not listening yet: connect the VPN here (disconnect + connect once)."
+        else:
+            state = "Sharing is OFF."
+        info = ("%s\n\nSOCKS5 proxy for the other device:\nAddress:  %s\nPort:  %d\n(no username / password)\n\n"
+                "1) Hotspot ON (or same Wi-Fi)\n2) Sharing ON, then connect the VPN here\n"
+                "3) Other device: set SOCKS5 proxy to the address + port above.%s"
+                % (state, ip or "-", s["port"],
                    ("\n\nOther addresses: " + ", ".join("%s=%s" % x for x in ips[1:])) if len(ips) > 1 else ""))
         lab = Label(text=info, font_size=dp(13), color=self.t_txt, halign="left", valign="top")
         lab.bind(size=lambda w, sz: setattr(w, "text_size", (sz[0], sz[1])))
@@ -1154,22 +1217,21 @@ class AmizooApp(App):
 
         def toggle(*_):
             s["on"] = not s["on"]
-            self.settings["share"] = {"on": s["on"], "pw": s["pw"], "port": s["port"]}
+            self.settings["share"] = {"on": s["on"], "port": s["port"]}
             self._save_settings()
-            self.status_text = "Sharing %s. Disconnect and connect again to apply." % ("ON" if s["on"] else "OFF")
+            self.status_text = "Sharing %s. Disconnect and connect the VPN again to apply." % ("ON" if s["on"] else "OFF")
             mv.dismiss()
 
         def copy_tg(*_):
-            if ips:
-                self.copy_text("tg://socks?server=%s&port=%d&user=%s&pass=%s" % (ip, s["port"], s["user"], s["pw"]),
-                               "Telegram proxy link copied.")
+            if ip:
+                self.copy_text("tg://socks?server=%s&port=%d" % (ip, s["port"]), "Telegram proxy link copied.")
 
         def copy_plain(*_):
-            if ips:
-                self.copy_text("socks5://%s:%s@%s:%d" % (s["user"], s["pw"], ip, s["port"]), "Proxy copied.")
+            if ip:
+                self.copy_text("%s:%d" % (ip, s["port"]), "Address copied.")
 
         for text, fn in (("Turn sharing %s" % ("OFF" if s["on"] else "ON"), toggle),
-                         ("Copy socks5://user:pass@ip:port", copy_plain), ("Copy Telegram link", copy_tg)):
+                         ("Copy ip:port", copy_plain), ("Copy Telegram link", copy_tg)):
             b = GhostButton(text=text, size_hint_y=None, height=dp(44))
             b.bind(on_release=fn)
             card.add_widget(b)
