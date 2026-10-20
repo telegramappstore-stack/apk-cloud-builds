@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # A proxy is "working" only if it can fetch this URL and return HTTP 204 (no body to fake).
 TEST_TARGET = ("www.gstatic.com", 80, "/generate_204")
+# "Real delay" of V2Ray configs: same test URL as v2rayNG / NPV Tunnel (HTTPS, so TLS to the target is part of the time).
+V2RAY_TARGET = ("www.google.com", 443, "/generate_204")
 
 # SOCKS5 / HTTP proxies come ONLY from freeproxy.world (see fetch_freeproxy_world below).
 #
@@ -559,7 +561,7 @@ def _status_line(s):
 
 
 def _request(host, path, port):
-    hh = host if port == 80 else "%s:%d" % (host, port)
+    hh = host if port in (80, 443) else "%s:%d" % (host, port)
     return ("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
             % (path, hh)).encode()
 
@@ -590,6 +592,8 @@ def check_socks5(host, port, timeout=6.0, target=TEST_TARGET):
             _recvn(s, _recvn(s, 1)[0] + 2)
         else:
             return None
+        if tp == 443:                                                # HTTPS target: TLS through the tunnel (timing only)
+            s = ssl._create_unverified_context().wrap_socket(s, server_hostname=th)
         s.sendall(_request(th, path, tp))
         if b" 204" not in _status_line(s):
             return None
