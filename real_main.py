@@ -2,6 +2,7 @@
 (Android VpnService + bundled Xray core). On a PC it runs with a simulated connection."""
 import json
 import os
+import sys
 import threading
 import time
 
@@ -198,6 +199,14 @@ KV = r"""
                 font_size: sp(15)
                 bold: True
                 color: app.t_txt
+            Pill:
+                size_hint: None, None
+                size: dp(118), dp(26)
+                pos_hint: {'center_y': .5}
+                font_size: sp(11)
+                text: root.kind_text
+                bg: app.t_acc
+                opacity: 1 if root.kind_text else 0
         FloatLayout:
             size_hint_y: None
             height: dp(176)
@@ -294,20 +303,14 @@ ScreenManager:
                     color: app.t_txt
                 PillButton:
                     size_hint: None, None
-                    size: dp(104), dp(34)
+                    size: dp(150), dp(34)
                     pos_hint: {'center_y': .5}
-                    text: 'VPN ON'
+                    text: ('VPN  ' + app.vpn_kind) if app.vpn_kind else 'VPN ON'
                     opacity: 1 if app.vpn_on else 0
                     disabled: not app.vpn_on
                     bg: 0.10, 0.68, 0.42, 1
                     bg_down: 0.07, 0.55, 0.34, 1
                     on_release: app.open_conn()
-                GhostButton:
-                    size_hint: None, None
-                    size: dp(74), dp(34)
-                    pos_hint: {'center_y': .5}
-                    text: 'Theme'
-                    on_release: app.open_theme_dialog()
 
             Card:
                 size_hint_y: None
@@ -456,7 +459,8 @@ class Pill(Label):
 
 
 class PowerButton(ButtonBehavior, Widget):
-    """Big round connect button with a soft halo; the halo pulses while `busy` (and breathes while `breathe`)."""
+    """Big round connect button with a soft halo; the halo pulses while `busy` (and breathes while `breathe`).
+    Canvas instructions are created once and only updated afterwards (smooth on slow phones)."""
     color = ListProperty(BLUE)
     busy = BooleanProperty(False)
     breathe = BooleanProperty(False)
@@ -464,17 +468,28 @@ class PowerButton(ButtonBehavior, Widget):
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        self._ev = None
-        for name in ("pos", "size", "color", "state", "phase"):
-            self.bind(**{name: self._draw})
+        self._ev, self._r = None, 1.0
+        with self.canvas:
+            self._c_halo, self._e_halo = Color(), Ellipse()
+            self._c_p1, self._e_p1 = Color(0, 0, 0, 0), Ellipse()
+            self._c_p2, self._e_p2 = Color(0, 0, 0, 0), Ellipse()
+            self._c_main, self._e_main = Color(), Ellipse()
+            self._c_spin, self._l_spin = Color(1, 1, 1, 0), Line(circle=(0, 0, 1, 0, 90), width=dp(2.4), cap="round")
+            Color(1, 1, 1, 1)
+            self._l_ring = Line(circle=(0, 0, 1, 40, 320), width=dp(3.6), cap="round")
+            self._l_bar = Line(points=[0, 0, 0, 1], width=dp(3.6), cap="round")
+        self.bind(pos=self._layout, size=self._layout)
+        for name in ("color", "state", "phase", "busy", "breathe"):
+            self.bind(**{name: self._paint})
         self.bind(busy=self._on_busy, breathe=self._on_busy)
         self._on_busy()
-        self._draw()
+        self._layout()
 
     def _on_busy(self, *_):
-        if (self.busy or self.breathe) and self._ev is None:
+        on = self.busy or self.breathe
+        if on and self._ev is None:
             self._ev = Clock.schedule_interval(self._step, 1 / 30.0)
-        elif not (self.busy or self.breathe) and self._ev is not None:
+        elif not on and self._ev is not None:
             self._ev.cancel()
             self._ev = None
             self.phase = 0
@@ -482,29 +497,35 @@ class PowerButton(ButtonBehavior, Widget):
     def _step(self, dt):
         self.phase = (self.phase + dt / (1.4 if self.busy else 2.6)) % 1.0
 
-    def _draw(self, *_):
-        self.canvas.clear()
+    def _layout(self, *_):
         cx, cy = self.center
-        r = min(self.size) / 2.0 * 0.78
-        c = self.color
-        with self.canvas:
-            Color(c[0], c[1], c[2], 0.13)
-            Ellipse(pos=(cx - r * 1.22, cy - r * 1.22), size=(r * 2.44, r * 2.44))
-            if self.busy or self.breathe:
-                for off in (0.0, 0.5):
-                    ph = (self.phase + off) % 1.0
-                    k = 1 + 0.30 * ph
-                    Color(c[0], c[1], c[2], 0.30 * (1 - ph))
-                    Ellipse(pos=(cx - r * k, cy - r * k), size=(r * 2 * k, r * 2 * k))
-            Color(*(c[:3] + [0.82 if self.state == "down" else 1]))
-            Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
-            if self.busy:
-                ang = self.phase * 360
-                Color(1, 1, 1, 0.55)
-                Line(circle=(cx, cy, r * 0.86, ang, ang + 90), width=dp(2.4), cap="round")
-            Color(1, 1, 1, 1)
-            Line(circle=(cx, cy, r * 0.38, 40, 320), width=dp(3.6), cap="round")
-            Line(points=[cx, cy + r * 0.05, cx, cy + r * 0.52], width=dp(3.6), cap="round")
+        r = self._r = min(self.size) / 2.0 * 0.78
+        self._e_halo.pos, self._e_halo.size = (cx - r * 1.22, cy - r * 1.22), (r * 2.44, r * 2.44)
+        self._e_main.pos, self._e_main.size = (cx - r, cy - r), (2 * r, 2 * r)
+        self._l_ring.circle = (cx, cy, r * 0.38, 40, 320)
+        self._l_bar.points = [cx, cy + r * 0.05, cx, cy + r * 0.52]
+        self._paint()
+
+    def _paint(self, *_):
+        cx, cy = self.center
+        r, c = self._r, self.color
+        self._c_halo.rgba = (c[0], c[1], c[2], 0.13)
+        active = self.busy or self.breathe
+        for off, col, el in ((0.0, self._c_p1, self._e_p1), (0.5, self._c_p2, self._e_p2)):
+            if active:
+                ph = (self.phase + off) % 1.0
+                k = 1 + 0.30 * ph
+                col.rgba = (c[0], c[1], c[2], 0.30 * (1 - ph))
+                el.pos, el.size = (cx - r * k, cy - r * k), (r * 2 * k, r * 2 * k)
+            else:
+                col.rgba = (0, 0, 0, 0)
+        self._c_main.rgba = (c[0], c[1], c[2], 0.82 if self.state == "down" else 1)
+        if self.busy:
+            ang = self.phase * 360
+            self._c_spin.rgba = (1, 1, 1, 0.55)
+            self._l_spin.circle = (cx, cy, r * 0.86, ang, ang + 90)
+        else:
+            self._c_spin.rgba = (1, 1, 1, 0)
 
 
 class SpeedGraph(Widget):
@@ -581,6 +602,7 @@ class ConnScreen(Screen):
     error_text = StringProperty("")
     local_text = StringProperty("")
     local_btn = StringProperty("Local proxy")
+    kind_text = StringProperty("")
     down_hist = ListProperty([])
     up_hist = ListProperty([])
 
@@ -626,6 +648,7 @@ class AmizooApp(App):
     hero_sub = StringProperty("The best server is picked for you")
     hero_color = ListProperty(BLUE)
     hero_busy = BooleanProperty(False)
+    vpn_kind = StringProperty("")
     theme_name = StringProperty("light")
     t_bg = ListProperty(THEMES["light"]["bg"])
     t_surf = ListProperty(THEMES["light"]["surf"])
@@ -639,7 +662,10 @@ class AmizooApp(App):
     def build(self):
         self.settings_path = os.path.join(self.user_data_dir, "settings.json")
         self.settings = self._read_settings()
+        sys.setswitchinterval(0.001)                             # the UI thread gets the GIL back faster while scans run
         self.seen_rows = set()
+        self._st_t = self._save_t = 0.0
+        self._prev = []
         self.set_theme(self.settings.get("theme", "light"), animate=False, save=False)
         Window.clearcolor = self.t_bg
         self.bind(t_bg=lambda *_: setattr(Window, "clearcolor", self.t_bg))
@@ -659,7 +685,7 @@ class AmizooApp(App):
         self._last_rx = self._last_tx = 0
         self._last_tick = self._last_ping = 0.0
         self._ping_running, self._direct = False, None
-        self._refresh = Clock.create_trigger(self._refresh_list, 0.4)
+        self._refresh = Clock.create_trigger(self._refresh_list, 1.5)
         return Builder.load_string(KV)
 
     def on_start(self):
@@ -674,13 +700,22 @@ class AmizooApp(App):
             self.status_text = "Last scan: %d servers (not re-tested)." % len(self.working)
         self._refresh_list()
         self._geo_async()
+        adopted = self.engine.adopt()                            # the VPN kept running while the app was closed
+        if adopted:
+            self.current = adopted
+            self._conn().title_text = self._title_of(adopted)
+            self._conn().kind_text = self._kind_of(adopted)
+            s = self.engine.poll()
+            self._last_rx, self._last_tx, self._last_tick = s["rx"], s["tx"], time.time()
         Clock.schedule_interval(self._tick, 1.0)
         self.root.ids.splash.start(self._enter_home)
 
     def on_pause(self):
+        self._save_now(True)
         return True
 
     def on_stop(self):
+        self._save_now(True)
         try:
             self.local.stop()
         except Exception:
@@ -698,9 +733,11 @@ class AmizooApp(App):
         self._refresh_list()
 
     def _refresh_list(self, *_):
+        if self.root.current == "splash":
+            return                                              # rows are built when the start-up screen ends
         rows = self.root.ids.rows
         rows.clear_widgets()
-        shown = [p for p in self.working if self.tab == "all" or p.kind == self.tab][:MAX_SHOWN]
+        shown = [p for p in self.working if self.tab == "all" or p.kind == self.tab][:15 if self.scanning else MAX_SHOWN]      # few rows while scanning = smooth UI
         for i, p in enumerate(shown):
             row = ServerRow(p)
             if self.root.current != "splash" and id(p) not in self.seen_rows:
@@ -754,6 +791,7 @@ class AmizooApp(App):
                 return
         self.scanning = True
         self.stop_evt = threading.Event()
+        self._prev = list(self.working)                          # kept until the new scan has something
         self.working, self.total, self.tested = [], 0, 0
         self.progress = 0
         self._refresh_list()
@@ -786,7 +824,7 @@ class AmizooApp(App):
                     (pend if p.kind == "v2ray" and self.xray_ok else simple).append(p)
                 self._ui(self._result, p, ok)
 
-            pc.test_many(sample, on_res, stop)
+            pc.test_many(sample, on_res, stop, workers=32)
             if stop.is_set():
                 return
             if pend:                                                # 1) V2Ray: verify with the real Xray core
@@ -824,7 +862,16 @@ class AmizooApp(App):
             self.working.append(p)
             self.working.sort(key=_sort_key)
             self._refresh()
-        self.status_text = "Testing... %d / %d  -  %d passed" % (self.tested, self.total, len(self.working))
+        now = time.time()
+        if now - self._st_t > 0.3 or self.tested >= self.total:
+            self._st_t = now
+            self.status_text = "Testing... %d / %d  -  %d passed" % (self.tested, self.total, len(self.working))
+
+    def _save_now(self, force=False):
+        now = time.time()
+        if self.working and hasattr(self, "cache_path") and (force or now - self._save_t > 4):
+            self._save_t = now
+            pc.save_results(self.cache_path, self.working)
 
     def _verified(self, p, ms, i, n):
         if ms is not None:
@@ -832,6 +879,7 @@ class AmizooApp(App):
             self.working.append(p)
             self.working.sort(key=_sort_key)
             self._refresh()
+            self._save_now()
         self.status_text = "Xray check %d / %d  -  %d V2Ray verified" % (
             i, n, sum(1 for x in self.working if x.kind == "v2ray"))
 
@@ -850,6 +898,11 @@ class AmizooApp(App):
             return
         self.scanning = False
         stopped = stop.is_set()
+        if (stopped or not self.working) and self._prev:        # stopped early / nothing new: keep the saved ones
+            have = {pc._key(p) for p in self.working}
+            self.working += [p for p in self._prev if pc._key(p) not in have]
+            self.working.sort(key=_sort_key)
+        self._prev = []
         if self.total and not stopped:
             self.progress = 1
         self._refresh_list()
@@ -947,6 +1000,7 @@ class AmizooApp(App):
         except (ValueError, TypeError):
             port = 0
         self.set_port(port if 1 <= port <= 65535 else None, save=False)
+        self._load_share()
 
     def set_theme(self, key, animate=True, save=True):
         if key not in THEMES:
@@ -1047,7 +1101,7 @@ class AmizooApp(App):
 
     # ================================================================== menu
     def open_menu(self):
-        mv = ModalView(size_hint=(0.9, None), height=dp(560), background="", background_color=(0.05, 0.08, 0.16, 0.45))
+        mv = ModalView(size_hint=(0.9, None), height=dp(620), background="", background_color=(0.05, 0.08, 0.16, 0.45))
         card = Card(orientation="vertical", padding=dp(16), spacing=dp(10))
         items = (("Theme / appearance", self.open_theme_dialog),
                  ("Port for SOCKS5/HTTP:  %s" % self.port_text, self.open_port_dialog),
@@ -1055,7 +1109,8 @@ class AmizooApp(App):
                  ("Re-ping all servers", self.reping),
                  ("Copy Telegram proxy links", lambda: self.copy_all("tg")),
                  ("Copy config list (v2rayNG / NPV)", lambda: self.copy_all("v2ray")),
-                 ("Share all", self.share_all))
+                 ("Share all", self.share_all),
+                 ("Share this VPN (hotspot / Wi-Fi): %s" % ("ON" if en.SHARE["on"] else "OFF"), self.open_share_dialog))
         for text, fn in items:
             b = GhostButton(text=text, size_hint_y=None, height=dp(46))
             b.bind(on_release=lambda *_, f=fn: (mv.dismiss(), f()))
@@ -1065,6 +1120,59 @@ class AmizooApp(App):
                      font_size=dp(11), color=self.t_muted, halign="center")
         note.bind(size=lambda w, s: setattr(w, "text_size", (s[0], None)))
         card.add_widget(note)
+        mv.add_widget(card)
+        mv.open()
+
+    # ================================================================== share the connection with other devices
+    def _load_share(self):
+        import secrets
+        d = self.settings.get("share") or {}
+        en.SHARE["on"] = bool(d.get("on"))
+        en.SHARE["pw"] = d.get("pw") or secrets.token_hex(4)
+        try:
+            en.SHARE["port"] = int(d.get("port") or 10809)
+        except (ValueError, TypeError):
+            en.SHARE["port"] = 10809
+        self.settings["share"] = {"on": en.SHARE["on"], "pw": en.SHARE["pw"], "port": en.SHARE["port"]}
+
+    def open_share_dialog(self):
+        s = en.SHARE
+        ips = en.lan_ips()
+        ip = ips[0][1] if ips else "(no hotspot / Wi-Fi address found)"
+        mv = ModalView(size_hint=(0.92, None), height=dp(470), background="", background_color=(0.05, 0.08, 0.16, 0.45))
+        card = Card(orientation="vertical", padding=dp(16), spacing=dp(8))
+        info = ("Other devices connect to this SOCKS5 proxy:\n\n"
+                "Address:  %s\nPort:  %d\nUser:  %s\nPassword:  %s\n\n"
+                "1) Turn ON the phone hotspot (or join the same Wi-Fi).\n"
+                "2) Connect the VPN here.\n"
+                "3) On the other device set a SOCKS5 proxy with the values above.%s"
+                % (ip, s["port"], s["user"], s["pw"],
+                   ("\n\nOther addresses: " + ", ".join("%s=%s" % x for x in ips[1:])) if len(ips) > 1 else ""))
+        lab = Label(text=info, font_size=dp(13), color=self.t_txt, halign="left", valign="top")
+        lab.bind(size=lambda w, sz: setattr(w, "text_size", (sz[0], sz[1])))
+        card.add_widget(lab)
+
+        def toggle(*_):
+            s["on"] = not s["on"]
+            self.settings["share"] = {"on": s["on"], "pw": s["pw"], "port": s["port"]}
+            self._save_settings()
+            self.status_text = "Sharing %s. Disconnect and connect again to apply." % ("ON" if s["on"] else "OFF")
+            mv.dismiss()
+
+        def copy_tg(*_):
+            if ips:
+                self.copy_text("tg://socks?server=%s&port=%d&user=%s&pass=%s" % (ip, s["port"], s["user"], s["pw"]),
+                               "Telegram proxy link copied.")
+
+        def copy_plain(*_):
+            if ips:
+                self.copy_text("socks5://%s:%s@%s:%d" % (s["user"], s["pw"], ip, s["port"]), "Proxy copied.")
+
+        for text, fn in (("Turn sharing %s" % ("OFF" if s["on"] else "ON"), toggle),
+                         ("Copy socks5://user:pass@ip:port", copy_plain), ("Copy Telegram link", copy_tg)):
+            b = GhostButton(text=text, size_hint_y=None, height=dp(44))
+            b.bind(on_release=fn)
+            card.add_widget(b)
         mv.add_widget(card)
         mv.open()
 
@@ -1078,14 +1186,31 @@ class AmizooApp(App):
         self.current = proxy
         c = self._conn()
         c.down_hist, c.up_hist, c.error_text, c.ping_text = [], [], "", "-"
-        c.title_text = (proxy.name or proxy.addr) if proxy.kind == "v2ray" else "%s  %s" % (proxy.kind.upper(), proxy.addr)
-        if proxy.country:
-            c.title_text += "  (%s)" % proxy.country
+        c.title_text = self._title_of(proxy)
+        c.kind_text = self._kind_of(proxy)
         self._last_rx = self._last_tx = 0
         self._last_tick, self._last_ping, self._direct = time.time(), 0.0, None
         self._go("conn", "left")
         self.engine.connect(proxy)
         self._tick(0)
+
+    @staticmethod
+    def _kind_short(proxy):
+        if proxy is None:
+            return ""
+        return (proxy.proto or "v2ray").upper() if proxy.kind == "v2ray" else ("SOCKS5" if proxy.kind == "socks5" else "HTTP")
+
+    @classmethod
+    def _kind_of(cls, proxy):
+        k = cls._kind_short(proxy)
+        if proxy is not None and proxy.kind == "v2ray" and proxy.sec and proxy.sec != "none":
+            k += " " + proxy.sec.upper()
+        return k
+
+    @staticmethod
+    def _title_of(proxy):
+        t = (proxy.name or proxy.addr) if proxy.kind == "v2ray" else "%s  %s" % (proxy.kind.upper(), proxy.addr)
+        return t + ("  (%s)" % proxy.country if proxy.country else "")
 
     def open_conn(self):
         if self.current:
@@ -1138,6 +1263,7 @@ class AmizooApp(App):
         s = self.engine.poll()
         st = s["state"]
         self.vpn_on = st == "running"
+        self.vpn_kind = self._kind_short(self.current) if self.vpn_on else ""
         c = self._conn()
         now = time.time()
         step = max(0.2, now - self._last_tick)
@@ -1168,7 +1294,7 @@ class AmizooApp(App):
                 st, ("Tap to connect", list(self.t_acc)))
             self.hero_busy = st == "starting"
         if st in ("starting", "running"):
-            self.hero_sub = c.title_text if st == "starting" else "%s  -  %s" % (c.title_text, fmt_time(s["uptime"]))
+            self.hero_sub = c.title_text if st == "starting" else "%s  -  %s  -  %s" % (c.title_text, c.kind_text, fmt_time(s["uptime"]))
         elif self.scanning:
             self.hero_sub = self.status_text
         else:
