@@ -6,12 +6,11 @@ package.name = netfree
 package.domain = org.netfree
 source.dir = .
 source.include_exts = py,png,jpg,ttf
-version = 2.0
-# openssl + certifi: needed for TLS; arabic-reshaper + python-bidi(0.4.2 = pure python): Persian text
+version = 2.1
 requirements = python3,kivy==2.3.0,openssl,certifi,arabic-reshaper==3.0.0,python-bidi==0.4.2,six,pyjnius,android
 orientation = portrait
 fullscreen = 0
-android.permissions = INTERNET,ACCESS_NETWORK_STATE,ACCESS_WIFI_STATE,WAKE_LOCK
+android.permissions = INTERNET,ACCESS_NETWORK_STATE,ACCESS_WIFI_STATE,WAKE_LOCK,BIND_VPN_SERVICE
 android.api = 33
 android.minapi = 24
 android.archs = arm64-v8a
