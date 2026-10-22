@@ -5,16 +5,20 @@ title = NetFree
 package.name = netfree
 package.domain = org.netfree
 source.dir = .
-source.include_exts = py,png,jpg,ttf
+source.include_exts = py,png,jpg,ttf,java
 version = 2.1
+# openssl + certifi: needed for TLS; arabic-reshaper + python-bidi(0.4.2 = pure python): Persian text
 requirements = python3,kivy==2.3.0,openssl,certifi,arabic-reshaper==3.0.0,python-bidi==0.4.2,six,pyjnius,android
 orientation = portrait
 fullscreen = 0
-android.permissions = INTERNET,ACCESS_NETWORK_STATE,ACCESS_WIFI_STATE,WAKE_LOCK,BIND_VPN_SERVICE
+android.permissions = INTERNET,ACCESS_NETWORK_STATE,ACCESS_WIFI_STATE,WAKE_LOCK
 android.api = 33
 android.minapi = 24
 android.archs = arm64-v8a
 android.accept_sdk_license = True
+# VPN key icon: Java VpnService + hook that registers it in the manifest
+android.add_src = java
+p4a.hook = p4a_hook.py
 
 [buildozer]
 log_level = 2
