@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""NetFree v2 - Kivy / Android port (Fixed & Enhanced).
-Cloudflare IP scanner + online proxy finder + resilient SOCKS5/HTTP server + Cloudflare-IP forwarder + Real VPNService & Hardest Blackout.
+"""NetFree v2.1 - Kivy / Android port (real VpnService key + system proxy, normal/unlimited IP ranges, fixed Persian text, new UI).
+Cloudflare IP scanner + online proxy finder + resilient SOCKS5/HTTP server + Cloudflare-IP forwarder.
+Engine is unchanged from netfree_v2.py; only the UI is new (Kivy) and the scan ranges are much larger.
+Removed (not possible on Android): Windows system proxy, SNI-spoof (needs WinDivert).
 """
 import asyncio, ipaddress, json, os, queue, random, re, socket, ssl, statistics, struct, sys, threading, time
 import urllib.request
@@ -18,12 +20,36 @@ def _vctx():
     return ssl.create_default_context(cafile=CAFILE) if CAFILE else ssl.create_default_context()
 
 
-CF = ["173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
-      "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/12",
-      "172.64.0.0/13", "131.0.72.0/22", "1.0.0.0/24", "1.1.1.0/24", "199.27.128.0/21", "185.146.172.0/22"]
+# Scan ranges. Every IP is verified (server: cloudflare / cf-ray) so stale or wrong blocks are simply skipped.
+# NORMAL (default): only the official published Cloudflare ranges (cloudflare.com/ips-v4).
+CF_NORMAL = ["173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18",
+            "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17",
+            "162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22"]
+# UNLIMITED (only when the user switches "رنج IP نامحدود" on): normal + the whole 104.16.0.0/12 CLOUDFLARENET block
+# + extra Cloudflare-owned blocks (DNS 1.x, legacy 199.27, 185.146, 45.131 ...) + the scattered 8.x edge blocks.
+CF_EXTRA = ["104.16.0.0/12", "1.0.0.0/24", "1.1.1.0/24", "199.27.128.0/21", "185.146.172.0/22", "66.235.200.0/24",
+           "45.131.4.0/22", "45.131.208.0/22", "8.6.144.0/24", "8.9.231.0/24", "8.10.148.0/24", "8.14.199.0/24",
+           "8.14.202.0/24", "8.17.205.0/24", "8.17.206.0/24", "8.18.50.0/24", "8.18.113.0/24", "8.18.194.0/24",
+           "8.19.8.0/24", "8.20.100.0/24", "8.20.101.0/24", "8.20.103.0/24", "8.20.122.0/23", "8.20.124.0/23",
+           "8.20.126.0/24", "8.20.253.0/24", "8.21.8.0/22", "8.21.13.0/24", "8.21.110.0/23", "8.21.239.0/24",
+           "8.23.139.0/24", "8.24.87.0/24", "8.26.182.0/24", "8.27.64.0/22", "8.28.20.0/24", "8.28.82.0/24",
+           "8.28.126.0/24", "8.28.213.0/24", "8.29.105.0/24", "8.29.230.0/23", "8.30.234.0/24", "8.31.2.0/24",
+           "8.31.160.0/24", "8.34.69.0/24", "8.34.70.0/24", "8.34.200.0/22", "8.35.57.0/24", "8.35.58.0/23",
+           "8.35.149.0/24", "8.36.216.0/22", "8.37.41.0/24", "8.38.147.0/24", "8.38.148.0/23", "8.38.172.0/24",
+           "8.39.6.0/24", "8.39.18.0/24", "8.39.124.0/23", "8.39.201.0/24", "8.39.202.0/23", "8.39.204.0/22",
+           "8.39.212.0/22", "8.40.26.0/23", "8.40.29.0/24", "8.40.30.0/23", "8.40.107.0/24", "8.40.111.0/24",
+           "8.40.140.0/24", "8.41.5.0/24", "8.41.6.0/23", "8.41.36.0/23", "8.42.51.0/24", "8.42.52.0/23", "8.42.54.0/23",
+           "8.42.161.0/24", "8.42.164.0/24", "8.42.172.0/24", "8.42.245.0/24", "8.43.121.0/24", "8.43.122.0/23",
+           "8.43.224.0/23", "8.43.226.0/24", "8.44.0.0/22", "8.44.6.0/24", "8.44.58.0/23", "8.44.60.0/22", "8.45.41.0/24",
+           "8.45.42.0/23", "8.45.44.0/22", "8.45.97.0/24", "8.45.101.0/24", "8.45.102.0/23", "8.45.108.0/24",
+           "8.45.111.0/24", "8.45.144.0/22", "8.46.113.0/24", "8.46.114.0/23", "8.46.117.0/24", "8.46.118.0/23",
+           "8.47.9.0/24", "8.47.12.0/22", "8.47.69.0/24", "8.47.71.0/24", "8.48.130.0/23", "8.48.132.0/24",
+           "8.48.134.0/24"]
+CF = CF_NORMAL + CF_EXTRA  # kept for compatibility
 
 
 def merge_nets(nets):
+    """Drop overlaps (e.g. 104.16.0.0/13 inside 104.16.0.0/12) so nothing is counted twice."""
     out = []
     for v in (4, 6):
         out += list(ipaddress.collapse_addresses([x for x in nets if x.version == v]))
@@ -31,6 +57,7 @@ def merge_nets(nets):
 
 
 def sample_ips(nets, n):
+    """Random IPs spread over ALL ranges. weighting by size**0.75 keeps the many small blocks from being drowned out by the huge /12 and /13."""
     n = min(n, sum(x.num_addresses for x in nets)); wts = [x.num_addresses ** 0.75 for x in nets]; out, tries = set(), 0
     while len(out) < n and tries < n * 30:
         x = random.choices(nets, wts)[0]; out.add(str(x[random.randrange(x.num_addresses)])); tries += 1
@@ -38,32 +65,41 @@ def sample_ips(nets, n):
 
 
 RAW = "https://raw.githubusercontent.com/"
-SRC = {"SOCKS5": [RAW + "TheSpeedX/PROXY-List/master/socks5.txt", RAW + "monosans/proxy-list/main/proxies/socks5.txt"],
+SRC = {"SOCKS5": [RAW + "TheSpeedX/PROXY-List/master/socks5.txt", RAW + "monosans/proxy-list/main/proxies/socks5.txt",
+                  RAW + "hookzof/socks5_list/master/proxy.txt"],
        "HTTP": [RAW + "TheSpeedX/PROXY-List/master/http.txt", RAW + "monosans/proxy-list/main/proxies/http.txt"]}
-SNIS = ["security.vercel.com", "hcaptcha.com", "www.snapp.ir", "snapp.ir", "auth.vercel.com", "www.digikala.com"]
+SNIS = ["security.vercel.com", "hcaptcha.com", "www.snapp.ir", "snapp.ir", "auth.vercel.com",
+        "www.digikala.com", "www.aparat.com", "www.speedtest.net", "cdnjs.cloudflare.com"]
 APP_DIR = os.path.join(os.path.expanduser("~"), ".netfree")
 CFG = os.path.join(APP_DIR, "config.json")
-IDLE = 300
+IDLE = 300  # seconds of silence before a relayed connection is dropped
 
 
 def load_cfg():
     try:
-        with open(CFG, encoding="utf8") as f: return json.load(f)
-    except Exception: return {}
+        with open(CFG, encoding="utf8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def save_cfg(d):
     try:
         os.makedirs(APP_DIR, exist_ok=True)
-        with open(CFG, "w", encoding="utf8") as f: json.dump(d, f, ensure_ascii=False, indent=1)
-    except Exception: pass
+        with open(CFG, "w", encoding="utf8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
 
 
+# ---------- probes ----------
 def tcp_ping(ip, port=443, t=3):
     s = time.perf_counter()
     try:
-        with socket.create_connection((ip, port), t): return (time.perf_counter() - s) * 1000
-    except OSError: return None
+        with socket.create_connection((ip, port), t):
+            return (time.perf_counter() - s) * 1000
+    except OSError:
+        return None
 
 
 def _ctx():
@@ -76,25 +112,32 @@ def tls_ping(ip, sni, t=3):
     try:
         with socket.create_connection((ip, 443), t) as c, _ctx().wrap_socket(c, server_hostname=sni):
             return (time.perf_counter() - s) * 1000
-    except (OSError, ssl.SSLError): return None
+    except (OSError, ssl.SSLError):
+        return None
 
 
 def cf_check(ip, sni, t=4):
+    """True if the IP really answers like a Cloudflare edge (server: cloudflare / cf-ray)."""
     try:
         with socket.create_connection((ip, 443), t) as c, _ctx().wrap_socket(c, server_hostname=sni) as s:
             s.settimeout(t)
             s.sendall(f"HEAD / HTTP/1.1\r\nHost: {sni}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n".encode())
             h = s.recv(2048).lower()
             return b"cloudflare" in h or b"cf-ray" in h
-    except (OSError, ssl.SSLError): return False
+    except (OSError, ssl.SSLError):
+        return False
 
 
 def probe_ip(ip, sni, samples=3, verify=True):
+    """Several TLS samples -> median latency, jitter, loss, optional Cloudflare verification."""
     lat = [m for m in (tls_ping(ip, sni, 3) for _ in range(samples)) if m is not None]
-    if not lat or 1 - len(lat) / samples > 0.5: return None
-    if verify and not cf_check(ip, sni): return None
+    if not lat or 1 - len(lat) / samples > 0.5:
+        return None
+    if verify and not cf_check(ip, sni):
+        return None
     med = statistics.median(lat); jit = max(lat) - min(lat); loss = 1 - len(lat) / samples
-    return {"ip": ip, "tls": med, "tcp": tcp_ping(ip) or med, "jit": jit, "ok": f"{len(lat)}/{samples}", "score": med + 1.5 * jit + 400 * loss}
+    return {"ip": ip, "tls": med, "tcp": tcp_ping(ip) or med, "jit": jit, "ok": f"{len(lat)}/{samples}",
+            "score": med + 1.5 * jit + 400 * loss}
 
 
 def _rn(c, n):
@@ -107,6 +150,7 @@ def _rn(c, n):
 
 
 def proxy_tunnel(kind, host, port, dh, dp, t=6):
+    """Open a tunnel through a SOCKS5/HTTP proxy to dh:dp. Returns a connected socket or None."""
     c = None
     try:
         c = socket.create_connection((host, port), t); c.settimeout(t)
@@ -132,27 +176,64 @@ def proxy_tunnel(kind, host, port, dh, dp, t=6):
         return None
 
 
+def proxy_ping(kind, host, port, t=6):
+    s0 = time.perf_counter(); c = proxy_tunnel(kind, host, port, "cp.cloudflare.com", 80, t)
+    if not c: return None
+    try:
+        c.sendall(b"GET /generate_204 HTTP/1.1\r\nHost: cp.cloudflare.com\r\nConnection: close\r\n\r\n")
+        return (time.perf_counter() - s0) * 1000 if b" 204" in c.recv(256)[:20] else None
+    except OSError:
+        return None
+    finally:
+        c.close()
+
+
+def proxy_probe(kind, host, port, samples=2, t=6):
+    """Real latency (several samples) + TLS-integrity check (verified cert through the tunnel => not MITM)."""
+    lat = [m for m in (proxy_ping(kind, host, port, t) for _ in range(samples)) if m is not None]
+    if not lat: return None
+    secure = False
+    c = proxy_tunnel(kind, host, port, "cloudflare.com", 443, t)
+    if c:
+        try:
+            with _vctx().wrap_socket(c, server_hostname="cloudflare.com"): secure = True
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            c.close()
+    med = statistics.median(lat); jit = max(lat) - min(lat)
+    return {"kind": kind, "addr": f"{host}:{port}", "host": host, "port": port, "lat": med, "jit": jit, "secure": secure,
+            "score": med + jit + (0 if secure else 600) + 300 * (1 - len(lat) / samples)}
+
+
 def fetch_proxies(kind, n, log=None):
     found = set()
+
     def get(u):
         try:
             return set(re.findall(r"(\d+\.\d+\.\d+\.\d+):(\d+)", urllib.request.urlopen(u, timeout=12, context=_vctx()).read().decode("utf8", "ignore")))
-        except Exception:
+        except Exception as e:
+            if log: log(f"دریافت لیست ناموفق: {u.split('/')[4]} ({e.__class__.__name__})")
             return set()
     with ThreadPoolExecutor(4) as ex:
         for r in ex.map(get, SRC[kind]): found |= r
-    return [(h, int(p)) for h, p in list(found)[:n]]
+    found = list(found); random.shuffle(found)
+    return [(h, int(p)) for h, p in found[:n]]
 
 
 def lan_ip():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as x:
             x.connect(("10.255.255.255", 1)); return x.getsockname()[0]
-    except OSError: return "127.0.0.1"
+    except OSError:
+        return "127.0.0.1"
 
 
 _dns = {}
+
+
 def doh(host):
+    """Resolve through Cloudflare DNS-over-HTTPS (1.1.1.1) to dodge poisoned local DNS. Cached 5 min."""
     hit = _dns.get(host)
     if hit and hit[1] > time.time(): return hit[0]
     try:
@@ -161,13 +242,67 @@ def doh(host):
         ips = [a["data"] for a in data.get("Answer", []) if a.get("type") == 1]
         if ips:
             _dns[host] = (ips, time.time() + 300); return ips
-    except Exception: pass
+    except Exception:
+        pass
     return None
 
 
+def hello(sni):
+    """Minimal TLS ClientHello carrying the fake SNI."""
+    n = sni.encode()
+    ext = b"\x00\x00" + struct.pack(">HHBH", len(n) + 5, len(n) + 3, 0, len(n)) + n
+    ext += b"\x00\x0a\x00\x04\x00\x02\x00\x1d" + b"\x00\x0d\x00\x04\x00\x02\x04\x03"
+    body = b"\x03\x03" + os.urandom(32) + b"\x00\x00\x02\x13\x01\x01\x00" + struct.pack(">H", len(ext)) + ext
+    hs = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16\x03\x01" + struct.pack(">H", len(hs)) + hs
+
+
+def sni_offset(d):
+    """(offset, length) of the SNI hostname inside a TLS ClientHello, or None."""
+    try:
+        i = 5 + 4 + 2 + 32
+        i += 1 + d[i]
+        i += 2 + int.from_bytes(d[i:i + 2], "big")
+        i += 1 + d[i]
+        end = i + 2 + int.from_bytes(d[i:i + 2], "big"); i += 2
+        while i + 4 <= min(end, len(d)):
+            t = int.from_bytes(d[i:i + 2], "big"); l = int.from_bytes(d[i + 2:i + 4], "big")
+            if t == 0: return i + 9, int.from_bytes(d[i + 7:i + 9], "big")
+            i += 4 + l
+    except Exception:
+        pass
+    return None
+
+
+def frag_plan(d):
+    """Split the first TLS record so the hostname is cut in the middle (breaks naive DPI matching)."""
+    cuts = {1, 5}
+    so = sni_offset(d)
+    if so: cuts.add(so[0] + max(1, so[1] // 2))
+    else: cuts |= {40, 90}
+    cuts = sorted(c for c in cuts if 0 < c < len(d))
+    parts, prev = [], 0
+    for c in cuts: parts.append(d[prev:c]); prev = c
+    parts.append(d[prev:]); return parts
+
+
+async def send_frag(w, d, frag):
+    if frag and d[:1] == b"\x16" and len(d) > 60:
+        try: w.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception: pass
+        for part in frag_plan(d):
+            w.write(part); await w.drain(); await asyncio.sleep(random.uniform(0.005, 0.03))
+    else:
+        w.write(d); await w.drain()
+
+
+# ---------- pools ----------
 class Pool:
+    """Thread-safe list of upstream endpoints with health tracking (fail count + exponential cool-down)."""
     def __init__(s): s.items, s.lock = [], threading.Lock()
+
     def __len__(s): return len(s.items)
+
     def add(s, kind, host, port, lat=0.0):
         with s.lock:
             for e in s.items:
@@ -175,25 +310,36 @@ class Pool:
                     e["lat"] = lat or e["lat"]; return e
             e = {"kind": kind, "host": host, "port": port, "lat": lat, "fails": 0, "until": 0.0}
             s.items.append(e); return e
+
     def remove(s, e):
         with s.lock:
             if e in s.items: s.items.remove(e)
+
     def clear(s):
         with s.lock: s.items.clear()
+
     def snapshot(s):
         with s.lock: return list(s.items)
+
     def ordered(s):
         now, items = time.time(), s.snapshot()
         live = [e for e in items if e["until"] <= now] or sorted(items, key=lambda e: e["until"])[:1]
         return sorted(live, key=lambda e: (min(e["fails"], 3), e["lat"] or 9e9))
+
     def good(s, e): e["fails"] = 0; e["until"] = 0.0
+
     def bad(s, e): e["fails"] += 1; e["until"] = time.time() + min(300, 10 * 2 ** min(e["fails"], 5))
+
+    def mark(s, e, ms):
+        if ms: e["lat"] = ms; s.good(e)
+        else: s.bad(e)
 
 
 class Stats:
     def __init__(s): s.up = s.down = s.conns = s.active = s.fail = 0; s.t0 = time.time()
 
 
+# ---------- relay + servers ----------
 async def pipe(r, w, st=None, key="down"):
     try:
         while True:
@@ -201,7 +347,8 @@ async def pipe(r, w, st=None, key="down"):
             if not d: break
             w.write(d); await w.drain()
             if st: setattr(st, key, getattr(st, key) + len(d))
-    except Exception: pass
+    except Exception:
+        pass
     finally:
         try: w.close()
         except Exception: pass
@@ -211,40 +358,196 @@ async def open_tcp(host, port, t=8):
     return await asyncio.wait_for(asyncio.open_connection(host, port), t)
 
 
+async def via_proxy(kind, uh, up, h, p, t=10):
+    rr, rw = await open_tcp(uh, up, t)
+    try:
+        hb = h.encode()
+        if kind == "SOCKS5":
+            rw.write(b"\x05\x01\x00")
+            if await asyncio.wait_for(rr.readexactly(2), t) != b"\x05\x00": raise OSError("auth")
+            rw.write(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + struct.pack(">H", p))
+            rep = await asyncio.wait_for(rr.readexactly(4), t)
+            if rep[1]: raise OSError("refused")
+            n = {1: 4, 4: 16}.get(rep[3])
+            if n is None: n = (await rr.readexactly(1))[0]
+            await asyncio.wait_for(rr.readexactly(n + 2), t)
+        else:
+            rw.write(f"CONNECT {h}:{p} HTTP/1.1\r\nHost: {h}:{p}\r\n\r\n".encode())
+            head = await asyncio.wait_for(rr.readuntil(b"\r\n\r\n"), t)
+            if b" 200" not in head.split(b"\r\n")[0]: raise OSError("refused")
+        return rr, rw
+    except BaseException:
+        rw.close(); raise
+
+
 class Srv:
     def __init__(s, host, port, log, frag=True):
         s.host, s.port, s.log, s.frag = host, port, log, frag
         s.stats, s.state, s.loop, s.stopping = Stats(), "starting", None, False
+
     def run(s):
         try: asyncio.run(s.main())
         except Exception as e: s.log(f"خطا: {e}")
         finally: s.state = "stopped"
+
     async def main(s):
         s.ev = asyncio.Event(); s.sem = asyncio.Semaphore(350); s.loop = asyncio.get_running_loop()
         try:
             srv = await asyncio.start_server(s.handle, s.host, s.port, backlog=256)
         except OSError as e:
             s.log(f"پورت {s.port} قابل استفاده نیست: {e}"); return
-        s.state = "running"; s.log(f"{s.__class__.__name__} فعال شد")
+        s.state = "running"; s.log(f"{s.__class__.__name__} روی {s.host}:{s.port} فعال شد")
+        task = asyncio.create_task(s.extra())
         await s.ev.wait()
-        srv.close()
+        task.cancel(); srv.close()
+
+    async def extra(s): pass
+
     def stop(s):
         s.stopping = True
         if s.loop: s.loop.call_soon_threadsafe(s.ev.set)
 
+    async def up(s, r, w):
+        """client -> remote; fragments the very first TLS hello when enabled."""
+        try:
+            d = await asyncio.wait_for(r.read(65536), IDLE)
+            if d: await send_frag(w, d, s.frag); s.stats.up += len(d)
+        except Exception:
+            w.close(); return
+        await pipe(r, w, s.stats, "up")
+
+    async def relay(s, r, w, rr, rw):
+        await asyncio.gather(s.up(r, rw), pipe(rr, w, s.stats, "down"))
+
 
 class Socks(Srv):
+    """One port, three protocols (SOCKS5 / SOCKS4(a) / HTTP proxy): upstream pool with automatic failover, DoH, TLS fragmentation, timeouts, connection cap."""
     def __init__(s, host, port, log, pool, frag=True, use_doh=True):
         super().__init__(host, port, log, frag); s.pool, s.doh = pool, use_doh
+
     async def resolve(s, h):
         if not s.doh or ":" in h or re.fullmatch(r"[\d.]+", h): return [h]
         ips = await asyncio.get_running_loop().run_in_executor(None, doh, h)
         return (ips or []) + [h]
+
+    async def connect(s, h, p):
+        if len(s.pool):
+            for e in s.pool.ordered()[:3]:
+                try:
+                    res = await via_proxy(e["kind"], e["host"], e["port"], h, p)
+                    s.pool.good(e); return res
+                except Exception:
+                    s.pool.bad(e)
+            s.log(f"همه آپ‌استریم‌ها برای {h} ناموفق بودند؛ مورد بعدی نوبت می‌گیرد")
+            return None
+        for ip in (await s.resolve(h))[:3]:
+            try: return await open_tcp(ip, p)
+            except Exception: pass
+        return None
+
+    async def _socks5(s, r, w):
+        n = (await asyncio.wait_for(r.readexactly(1), 10))[0]
+        await asyncio.wait_for(r.readexactly(n), 10); w.write(b"\x05\x00")
+        _, cmd, _, at = await asyncio.wait_for(r.readexactly(4), 10)
+        if at == 1: h = socket.inet_ntoa(await r.readexactly(4))
+        elif at == 3: h = (await r.readexactly((await r.readexactly(1))[0])).decode("utf8", "ignore")
+        else: h = socket.inet_ntop(socket.AF_INET6, await r.readexactly(16))
+        p = struct.unpack(">H", await r.readexactly(2))[0]
+        if cmd != 1:
+            w.write(b"\x05\x07\x00\x01" + b"\0" * 6); return None
+        return h, p, b"\x05\x00\x00\x01" + b"\0" * 6, b"\x05\x04\x00\x01" + b"\0" * 6, b""
+
+    async def _socks4(s, r, w):  # SOCKS4 and SOCKS4a (Chrome/Edge use this for "socks=" system proxies)
+        hd = await asyncio.wait_for(r.readexactly(7), 10)
+        if hd[0] != 1:
+            w.write(b"\x00\x5b" + b"\0" * 6); return None
+        p = struct.unpack(">H", hd[1:3])[0]; h = socket.inet_ntoa(hd[3:7])
+        await asyncio.wait_for(r.readuntil(b"\x00"), 10)  # user id
+        if hd[3:6] == b"\0\0\0" and hd[6] != 0:
+            h = (await asyncio.wait_for(r.readuntil(b"\x00"), 10))[:-1].decode("utf8", "ignore")
+        return h, p, b"\x00\x5a" + b"\0" * 6, b"\x00\x5b" + b"\0" * 6, b""
+
+    async def _http(s, first, r, w):  # HTTP proxy: CONNECT tunnels (https) and absolute-URI requests (http)
+        head = first + await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), 15)
+        line, _, rest = head.partition(b"\r\n")
+        parts = line.decode("latin1").split()
+        bad = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+        if len(parts) < 3:
+            return None
+        m, tgt, ver = parts[0], parts[1], parts[2]
+        if m.upper() == "CONNECT":
+            h, _, p = tgt.rpartition(":")
+            if not h: h, p = tgt, "443"
+            return h.strip("[]"), int(p), b"HTTP/1.1 200 Connection Established\r\n\r\n", bad, b""
+        mm = re.match(r"(?i)https?://(\[[^\]]+\]|[^/:]+)(?::(\d+))?(/.*)?$", tgt)
+        if not mm:
+            w.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"); return None
+        hdrs = [l for l in rest.split(b"\r\n") if l and not l.lower().startswith((b"proxy-connection", b"connection", b"proxy-authorization"))]
+        req = f"{m} {mm.group(3) or '/'} {ver}\r\n".encode("latin1") + b"\r\n".join(hdrs) + b"\r\nConnection: close\r\n\r\n"
+        return mm.group(1).strip("[]"), int(mm.group(2) or 80), b"", bad, req
+
     async def handle(s, r, w):
-        w.close()
+        rw, counted = None, False
+        async with s.sem:
+            try:
+                first = await asyncio.wait_for(r.readexactly(1), 10)
+                info = await (s._socks5(r, w) if first == b"\x05" else s._socks4(r, w) if first == b"\x04" else s._http(first, r, w))
+                if not info: return
+                h, p, ok, fail, early = info
+                s.stats.conns += 1; s.stats.active += 1; counted = True
+                res = await s.connect(h, p)
+                if not res:
+                    s.stats.fail += 1; w.write(fail); return
+                rr, rw = res
+                if ok: w.write(ok); await w.drain()
+                if early: rw.write(early); await rw.drain()
+                await s.relay(r, w, rr, rw)
+            except Exception:
+                pass
+            finally:
+                if counted: s.stats.active -= 1
+                w.close()
+                if rw: rw.close()
+
+class Forwarder(Srv):
+    """Local port -> best Cloudflare IP:443 from the pool. Failover at connect time + background health checks."""
+    def __init__(s, host, port, log, pool, frag=True, sni="security.vercel.com"):
+        super().__init__(host, port, log, frag); s.pool, s.sni = pool, sni
+
+    async def extra(s):
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(40)
+            for e in s.pool.snapshot():
+                s.pool.mark(e, await loop.run_in_executor(None, tls_ping, e["host"], s.sni, 4))
+
+    async def handle(s, r, w):
+        rw, counted = None, False
+        async with s.sem:
+            try:
+                s.stats.conns += 1; s.stats.active += 1; counted = True
+                rr = None
+                for e in s.pool.ordered()[:4]:
+                    try:
+                        rr, rw = await open_tcp(e["host"], e["port"], 6); s.pool.good(e); break
+                    except Exception:
+                        s.pool.bad(e); rr = rw = None
+                if not rw:
+                    s.stats.fail += 1; s.log("هیچ IP سالمی در استخر پاسخ نداد"); return
+                await s.relay(r, w, rr, rw)
+            except Exception:
+                pass
+            finally:
+                if counted: s.stats.active -= 1
+                w.close()
+                if rw: rw.close()
 
 
+
+
+# ---------- one-click real connection ----------
 def tunnel_https(kind, host, port, dest, t=6, path="/generate_204", n=300):
+    """Verified-TLS GET to dest through a proxy tunnel; returns the first n response bytes, or None."""
     c = proxy_tunnel(kind, host, port, dest, 443, t)
     if not c: return None
     try:
@@ -252,64 +555,221 @@ def tunnel_https(kind, host, port, dest, t=6, path="/generate_204", n=300):
             s.settimeout(t)
             s.sendall(f"GET {path} HTTP/1.1\r\nHost: {dest}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n".encode())
             data = b""
-            while len(data) < n:
-                x = s.recv(n - len(data))
-                if not x: break
-                data += x
+            try:
+                while len(data) < n:
+                    x = s.recv(n - len(data))
+                    if not x: break
+                    data += x
+            except OSError:
+                pass
             return data or None
-    except Exception: return None
-    finally: c.close()
+    except (OSError, ssl.SSLError):
+        return None
+    finally:
+        c.close()
+
+
+def speed_test(kind, host, port, t=8, nbytes=300000):
+    """KB/s while downloading nbytes from Cloudflare through the proxy (0 if it fails or stalls)."""
+    c = proxy_tunnel(kind, host, port, "speed.cloudflare.com", 443, t)
+    if not c: return 0
+    try:
+        with _vctx().wrap_socket(c, server_hostname="speed.cloudflare.com") as s:
+            s.settimeout(t); s0 = time.perf_counter()
+            s.sendall(f"GET /__down?bytes={nbytes} HTTP/1.1\r\nHost: speed.cloudflare.com\r\nConnection: close\r\n\r\n".encode())
+            got = 0
+            try:
+                while time.perf_counter() - s0 < t:
+                    x = s.recv(65536)
+                    if not x: break
+                    got += len(x)
+            except OSError:
+                pass
+            return got / 1024 / max(0.05, time.perf_counter() - s0) if got >= nbytes * 0.8 else 0
+    except (OSError, ssl.SSLError):
+        return 0
+    finally:
+        c.close()
+
+
+def strict_probe(kind, host, port, strict=True):
+    """A route only counts if it really reaches YouTube (and Google) over verified TLS and moves data at a usable speed."""
+    t0 = time.perf_counter(); r = tunnel_https(kind, host, port, "www.youtube.com", 6)
+    if not r or b" 204" not in r[:20]: return None
+    lat, kb = (time.perf_counter() - t0) * 1000, 0
+    if strict:
+        g = tunnel_https(kind, host, port, "www.google.com", 6)
+        if not g or b" 204" not in g[:20]: return None
+        kb = speed_test(kind, host, port)
+        if kb < 40: return None
+    return {"kind": kind, "addr": f"{host}:{port}", "host": host, "port": port, "lat": lat, "jit": 0, "secure": True,
+            "kbps": kb, "score": lat + 20000 / max(kb, 40)}
 
 
 def real_check(port, t=8):
+    """End-to-end test THROUGH the local server: YouTube must answer over verified TLS.
+    Returns (ms, exit_ip, country) or None. Green in the UI means YouTube is actually reachable."""
     s0 = time.perf_counter(); r = tunnel_https("SOCKS5", "127.0.0.1", port, "www.youtube.com", t)
     if not r or b" 204" not in r[:20]: return None
-    ms, ip, loc = (time.perf_counter() - s0) * 1000, "1.1.1.1", "IR/CF"
+    ms, ip, loc = (time.perf_counter() - s0) * 1000, "?", "?"
+    tr = tunnel_https("SOCKS5", "127.0.0.1", port, "1.1.1.1", t, "/cdn-cgi/trace", 1500)
+    if tr:
+        m = dict(l.split("=", 1) for l in tr.decode("utf8", "ignore").splitlines() if "=" in l)
+        ip, loc = m.get("ip", "?"), m.get("loc", "?")
     return ms, ip, loc
 
 
-# ======================= Kivy UI & Android VPN =======================
+def find_best(n, workers, ev, status, only_secure=True, want=8):
+    """Fetch public SOCKS5+HTTP proxy lists, test them in parallel, return the best `want` (lowest score)."""
+    status("دریافت لیست پروکسی‌ها ...")
+    cands = [(k, h, p) for k in ("SOCKS5", "HTTP") for h, p in fetch_proxies(k, n)]
+    random.shuffle(cands)
+    if not cands or ev.is_set(): return []
+    status(f"تست {len(cands)} پروکسی ...")
+    res, done = [], 0
+
+    def one(c): return None if ev.is_set() else strict_probe(c[0], c[1], c[2], only_secure)
+    with ThreadPoolExecutor(workers) as ex:
+        futs = [ex.submit(one, c) for c in cands]
+        for f in as_completed(futs):
+            done += 1
+            try: r = f.result()
+            except Exception: r = None
+            if r: res.append(r)
+            if done % 10 == 0: status(f"تست {done}/{len(cands)} — {len(res)} مسیر سالم")
+            if len(res) >= want * 2 or ev.is_set():
+                for g in futs: g.cancel()
+                break
+    return sorted(res, key=lambda r: r["score"])[:want]
+
+
+class QuickLink:
+    """One click: local SOCKS up -> find best proxies -> verify real end-to-end connectivity -> watchdog
+    that re-verifies every few seconds and automatically picks fresh routes when the link dies."""
+    ok_wait, bad_wait = 15, 4
+
+    def __init__(s, pool, status, state, on_server):
+        s.pool, s.status, s.state, s.on_server = pool, status, state, on_server
+        s.stop = threading.Event()
+
+    def start(s, lan, secure):
+        s.stop.set(); s.stop = ev = threading.Event()
+        threading.Thread(target=s._run, args=(ev, lan, secure), daemon=True).start()
+
+    def cancel(s): s.stop.set()
+
+    def _dead(s):
+        items = s.pool.snapshot(); return bool(items) and all(e["fails"] >= 3 for e in items)
+
+    def _refresh(s, ev, port, secure, attempts, sa):
+        for i in range(attempts):
+            sa(f"جستجوی بهترین مسیر (تلاش {i + 1}/{attempts}) ...")
+            best = find_best(300, 150, ev, sa, secure and i < attempts - 1, 8)  # last attempt relaxes the TLS filter
+            if ev.is_set(): return False
+            if not best: continue
+            s.pool.clear()
+            for r in best: s.pool.add(r["kind"], r["host"], r["port"], r["lat"])
+            sa("بررسی اتصال واقعی ...")
+            if any(real_check(port) for _ in range(3)): return True
+        return False
+
+    def _run(s, ev, lan, secure):
+        st = lambda *a: None if ev.is_set() else s.state(*a)
+        sa = lambda m: None if ev.is_set() else s.status(m)
+        try:
+            srv = s.on_server(lan)
+            if not srv: return st("failed", "راه‌اندازی سرور محلی ناموفق بود (پورت اشغال است؟)")
+            port, first, fails = srv.port, True, 0
+            while not ev.is_set():
+                if srv.state == "stopped": return st("idle", None)
+                if first or fails >= 2 or s._dead():
+                    if not first: st("connecting", None)
+                    if not s._refresh(ev, port, secure, 3 if first else 2, sa):
+                        if ev.is_set(): break
+                        if first: return st("failed", "مسیر سالمی پیدا نشد؛ دوباره تلاش کنید")
+                        ev.wait(s.bad_wait); continue
+                    first, fails = False, 0
+                res = real_check(port)
+                if res: fails = 0; st("connected", {"ms": res[0], "ip": res[1], "loc": res[2]})
+                else: fails += 1; sa("اتصال ضعیف است؛ در حال بررسی ...")
+                ev.wait(s.ok_wait if res else s.bad_wait)
+        except Exception as e:
+            st("failed", f"خطا: {e}")
+
+
+# ======================= Kivy UI (Android) =======================
+from kivy.animation import Animation
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
 from kivy.core.text import Label as CoreLabel, LabelBase
 from kivy.core.window import Window
-from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle
+from kivy.graphics.texture import Texture
 from kivy.metrics import dp, sp
 from kivy.properties import BooleanProperty, ListProperty, NumericProperty, ObjectProperty
 from kivy.uix.anchorlayout import AnchorLayout
+from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
-from kivy.uix.progressbar import ProgressBar
 from kivy.uix.recycleboxlayout import RecycleBoxLayout
 from kivy.uix.recycleview import RecycleView
-from kivy.uix.screenmanager import NoTransition, Screen, ScreenManager
-from kivy.uix.spinner import Spinner
-from kivy.uix.switch import Switch
+from kivy.uix.screenmanager import FadeTransition, Screen, ScreenManager
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.spinner import Spinner, SpinnerOption
 from kivy.uix.textinput import TextInput
-from kivy.utils import platform
+from kivy.uix.widget import Widget
+from kivy.utils import escape_markup, platform
 
-BG, CARD, TXT, MUT = (.05, .07, .13, 1), (.09, .125, .2, 1), (.9, .91, .92, 1), (.58, .64, .72, 1)
-ACC, GRN, RED, GRY, AMB = (.145, .388, .922, 1), (.063, .725, .506, 1), (.937, .267, .267, 1), (.392, .455, .545, 1), (.96, .62, .04, 1)
-NAV = [("quick", "سریع"), ("dash", "داشبورد"), ("blackout", "قطعی شدید"), ("scan", "اسکن IP"), ("online", "پروکسی"), ("pool", "استخر"), ("log", "لاگ")]
 
+def hx(h, a=1):
+    h = h.lstrip("#"); return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)) + (a,)
+
+
+def mix(a, b, t): return tuple(a[i] + (b[i] - a[i]) * t for i in range(4))
+
+
+BG, BG2 = hx("0a0f1f"), hx("121c3a")
+CARD, CARD2, FIELD, LINE = hx("141c35"), hx("1d2850"), hx("1a2342"), (1, 1, 1, .07)
+TXT, MUT, SOFT = hx("eef2fb"), hx("8d9bb8"), hx("a9c0ff")
+ACC, ACC2 = hx("4f7cff"), hx("8b5cf6")
+GRN, RED, AMB, GRY = hx("22c55e"), hx("ef4444"), hx("f59e0b"), hx("3a4668")
+NAV = [("quick", "سریع"), ("dash", "داشبورد"), ("scan", "اسکن IP"), ("online", "پروکسی"), ("pool", "استخر"), ("log", "لاگ")]
+
+# ---- Persian text: Kivy has no RTL shaping on Android -> reshape + bidi each line ourselves.
+# Fix for "rectangles": (1) ZWNJ (half-space) and other invisible marks have no glyph -> split on ZWNJ and reshape each part
+# separately; (2) bold text used a font without Persian glyphs -> every style (regular/bold/italic) is now registered.
 _AR = re.compile(r"[\u0600-\u06FF]")
+_INV = re.compile("[\u200b\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
+
+    def _shape(l):
+        return get_display("".join(arabic_reshaper.reshape(p) for p in _INV.sub("", l).split("\u200c")))
+
     def fa(s):
-        return "\n".join(get_display(arabic_reshaper.reshape(l)) if _AR.search(l) else l for l in str(s).split("\n"))
+        return "\n".join(_shape(l) if _AR.search(l) else l for l in str(s).split("\n"))
 except Exception:
-    def fa(s): return str(s)
+    def fa(s): return _INV.sub("", str(s)).replace("\u200c", " ")
 
 
 def setup_font():
-    here = os.path.dirname(os.path.abspath(__file__))
-    for p in (os.path.join(here, "fonts", "Vazirmatn-Regular.ttf"), "/system/fonts/NotoNaskhArabic-Regular.ttf",
-              "/system/fonts/NotoSansArabic-Regular.ttf", "/system/fonts/DroidNaskh-Regular.ttf"):
-        if os.path.exists(p):
-            LabelBase.register(name="Roboto", fn_regular=p); return
+    """Order: fonts/Vazirmatn-*.ttf (optional, prettiest) -> bundled fonts/DejaVuSans*.ttf (full Persian coverage) -> system fonts."""
+    here = os.path.dirname(os.path.abspath(__file__)); fd = os.path.join(here, "fonts")
+    cands = [(os.path.join(fd, "Vazirmatn-Regular.ttf"), os.path.join(fd, "Vazirmatn-Bold.ttf")),
+             (os.path.join(fd, "DejaVuSans.ttf"), os.path.join(fd, "DejaVuSans-Bold.ttf")),
+             ("/system/fonts/NotoNaskhArabic-Regular.ttf", "/system/fonts/NotoNaskhArabic-Bold.ttf"),
+             ("/system/fonts/NotoSansArabic-Regular.ttf", "/system/fonts/NotoSansArabic-Bold.ttf"),
+             ("C:/Windows/Fonts/tahoma.ttf", "C:/Windows/Fonts/tahomabd.ttf"),
+             ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")]
+    for r, b in cands:
+        if os.path.exists(r):
+            b = b if os.path.exists(b) else r
+            LabelBase.register(name="Roboto", fn_regular=r, fn_italic=r, fn_bold=b, fn_bolditalic=b)
+            return os.path.basename(r)
+    return None
 
 
 def fmt(n):
@@ -318,39 +778,123 @@ def fmt(n):
         n /= 1024
 
 
+def vgrad(top, bot):
+    t = Texture.create(size=(1, 2), colorfmt="rgba")
+    t.blit_buffer(bytes(int(c * 255) for c in (*bot, *top)), colorfmt="rgba", bufferfmt="ubyte")
+    t.mag_filter = t.min_filter = "linear"; return t
+
+
+# ---- Android VPN (key icon + system HTTP proxy -> local server)
+class VpnBridge:
+    """Starts NetFreeVpnService (java/NetFreeVpnService.java). The VPN has no tunnel routes, so normal traffic is untouched;
+    it shows the key icon and (Android 10+) sets the system HTTP proxy to 127.0.0.1:<port> for every app that honours it."""
+    REQ, SVC = 7731, "org.netfree.netfree.NetFreeVpnService"
+
+    def __init__(s, log):
+        s.log, s.granted, s.want, s.port, s.state, s.err, s._asking, s._bound = log, False, False, 1080, "off", "", False, False
+
+    def _env(s):
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        it = autoclass("android.content.Intent")(); it.setClassName(act.getPackageName(), s.SVC)
+        return autoclass, act, it
+
+    def request(s):
+        if platform != "android" or s.granted or s._asking: return
+        try:
+            from android import activity
+            ac, act, _ = s._env(); intent = ac("android.net.VpnService").prepare(act)
+            if intent is None:
+                s.granted = True
+                if s.want: s._launch()
+                return
+            if not s._bound: activity.bind(on_activity_result=s._result); s._bound = True
+            s._asking = True; act.startActivityForResult(intent, s.REQ)
+        except Exception as e:
+            s.state = "err"; s.err = str(e); s.log(f"درخواست VPN ناموفق: {e}")
+
+    def _result(s, req, res, data):
+        if req != s.REQ: return
+        s._asking = False; s.granted = (res == -1)
+        if s.granted:
+            s.log("اجازه VPN داده شد")
+            if s.want: s._launch()
+        else:
+            s.state = "denied"; s.log("اجازه VPN داده نشد؛ فقط پروکسی محلی فعال است")
+
+    def start(s, port):
+        s.port, s.want = port, True
+        if platform != "android": return
+        if s.granted: s._launch()
+        else: s.state = "ask"; s.request()
+
+    def _launch(s):
+        try:
+            ac, act, it = s._env(); it.putExtra("port", str(s.port)); act.startService(it); s.state = "starting"
+        except Exception as e:
+            s.state = "err"; s.err = str(e); s.log(f"راه‌اندازی VPN ناموفق: {e}")
+
+    def stop(s):
+        s.want = False
+        if platform == "android" and s.state != "off":
+            try: ac, act, it = s._env(); act.stopService(it)
+            except Exception: pass
+        s.state = "off"
+
+    def refresh(s):
+        if platform != "android" or not s.want or s.state in ("ask", "denied", "err"): return
+        try:
+            from jnius import autoclass
+            C = autoclass(s.SVC)
+            if C.running:
+                new = "old" if autoclass("android.os.Build$VERSION").SDK_INT < 29 else "on"
+                if s.state != new: s.state = new; s.log("VPN فعال شد (علامت کلید)")
+            elif s.state in ("on", "old"): s.state = "off"; s.log("VPN توسط سیستم قطع شد")
+            elif C.error: s.state = "err"; s.err = str(C.error); s.log(f"خطای VPN: {s.err}")
+        except Exception as e:
+            if s.state != "missing": s.state = "missing"; s.log(f"سرویس VPN در این بیلد نیست: {e}")
+
+
+# ---- widgets
 class RBtn(Button):
     bg = ListProperty(ACC)
     circle = BooleanProperty(False)
+
     def __init__(s, **k):
         k.setdefault("background_normal", ""); k.setdefault("background_down", ""); k["background_color"] = (0, 0, 0, 0)
+        k.setdefault("bold", True); k.setdefault("color", (1, 1, 1, 1))
         super().__init__(**k)
         with s.canvas.before:
-            s._c = Color(*s.bg); s._r = RoundedRectangle(pos=s.pos, size=s.size, radius=[dp(12)])
+            s._c = Color(*s.bg); s._r = RoundedRectangle(pos=s.pos, size=s.size, radius=[dp(14)])
         s.bind(pos=s._u, size=s._u, bg=s._u, state=s._u, circle=s._u); s._u()
+
     def _u(s, *a):
-        k, b = (.75 if s.state == "down" else 1), s.bg
+        k, b = (.72 if s.state == "down" else 1), s.bg
         s._c.rgba = (b[0] * k, b[1] * k, b[2] * k, b[3] if len(b) > 3 else 1)
         s._r.pos, s._r.size = s.pos, s.size
-        s._r.radius = [min(s.width, s.height) / 2 if s.circle else dp(12)]
+        s._r.radius = [min(s.width, s.height) / 2 if s.circle else dp(14)]
 
 
-def B(text, cb, color=ACC, h=44, size=13):
+def B(text, cb, color=ACC, h=46, size=13):
     return RBtn(text=fa(text), on_release=lambda *_: cb(), bg=color, font_size=sp(size), size_hint_y=None, height=dp(h))
 
 
 class WL(Label):
+    """Wrapping label. Persian paragraphs are word-wrapped in logical order BEFORE reshaping, so lines read correctly."""
     def __init__(s, text="", size=13, color=TXT, bold=False, center=False, smart=True, **k):
         super().__init__(font_size=sp(size), color=color, bold=bold, size_hint_y=None,
                          halign="center" if center else "right", valign="middle", **k)
         s.smart, s.raw, s._ready = smart, "", False
         s.bind(width=s._on_w, texture_size=s._on_h); s.set(text)
+
     def _on_w(s, *a): s._ready = True; s.text_size = (s.width, None); s._layout()
     def _on_h(s, *a): s.height = max(dp(22), s.texture_size[1] + dp(6))
     def set(s, t): s.raw = str(t); s._layout()
+
     def _layout(s):
         if not (s.smart and s._ready and _AR.search(s.raw)):
             s.text = fa(s.raw); return
-        cl, mw, out = CoreLabel(font_name=s.font_name, font_size=s.font_size), s.width - dp(4), []
+        cl, mw, out = CoreLabel(font_name=s.font_name, font_size=s.font_size, bold=s.bold), s.width - dp(4), []
         for para in s.raw.split("\n"):
             cur = ""
             for w in para.split(" "):
@@ -363,104 +907,274 @@ class WL(Label):
 
 class Card(BoxLayout):
     def __init__(s, **k):
-        k.setdefault("orientation", "vertical"); k.setdefault("padding", dp(12)); k.setdefault("spacing", dp(8)); k.setdefault("size_hint_y", None)
+        k.setdefault("orientation", "vertical"); k.setdefault("padding", dp(14)); k.setdefault("spacing", dp(10)); k.setdefault("size_hint_y", None)
         super().__init__(**k)
         s.bind(minimum_height=s.setter("height"))
         with s.canvas.before:
-            Color(*CARD); s._r = RoundedRectangle(pos=s.pos, size=s.size, radius=[dp(14)])
+            Color(0, 0, 0, .3); s._s = RoundedRectangle(radius=[dp(18)])
+            Color(*CARD); s._r = RoundedRectangle(radius=[dp(18)])
+            Color(*LINE); s._l = Line(rounded_rectangle=(0, 0, 1, 1, dp(18)), width=1)
         s.bind(pos=s._u, size=s._u)
+
+    def _u(s, *a):
+        x, y = s.pos; w, h = s.size
+        s._s.pos, s._s.size = (x, y - dp(2)), (w, h)
+        s._r.pos, s._r.size = s.pos, s.size
+        s._l.rounded_rectangle = (x, y, w, h, dp(18))
+
+
+class Bar(Widget):
+    def __init__(s, col=ACC, **k):
+        super().__init__(size_hint=(None, 1), width=dp(4), **k)
+        with s.canvas:
+            Color(*col); s._r = RoundedRectangle(radius=[dp(2)])
+        s.bind(pos=s._u, size=s._u)
+
+    def _u(s, *a): s._r.pos = (s.x, s.y + dp(5)); s._r.size = (s.width, max(0, s.height - dp(10)))
+
+
+class Tile(BoxLayout):
+    def __init__(s, title, **k):
+        super().__init__(orientation="vertical", padding=[dp(6), dp(8)], spacing=dp(2), **k)
+        with s.canvas.before:
+            Color(*CARD2); s._r = RoundedRectangle(radius=[dp(14)])
+        s.bind(pos=s._u, size=s._u)
+        s.val = WL("-", 14, TXT, True, center=True); s.add_widget(s.val); s.add_widget(WL(title, 11, MUT, center=True))
+
+    def _u(s, *a): s._r.pos, s._r.size = s.pos, s.size
+
+
+class Prog(Widget):
+    value, max = NumericProperty(0), NumericProperty(1)
+
+    def __init__(s, **k):
+        super().__init__(size_hint_y=None, height=dp(8), **k)
+        with s.canvas:
+            Color(*FIELD); s._t = RoundedRectangle(radius=[dp(4)])
+            Color(*ACC); s._f = RoundedRectangle(radius=[dp(4)])
+        s.bind(pos=s._u, size=s._u, value=s._u, max=s._u); s._u()
+
+    def _u(s, *a):
+        s._t.pos, s._t.size = s.pos, s.size
+        s._f.pos, s._f.size = s.pos, (s.width * min(1, max(0, s.value / (s.max or 1))), s.height)
+
+
+class Toggle(ButtonBehavior, Widget):
+    active = BooleanProperty(False)
+    prog = NumericProperty(0)
+
+    def __init__(s, active=False, **k):
+        super().__init__(size_hint=(None, None), size=(dp(52), dp(30)), **k)
+        with s.canvas:
+            s._tc = Color(*GRY); s._tr = RoundedRectangle(radius=[dp(15)])
+            Color(1, 1, 1, 1); s._kn = Ellipse()
+        s.bind(pos=s._u, size=s._u, prog=s._u)
+        s.active = bool(active); s.prog = 1.0 if s.active else 0.0; s._u()
+        s.bind(active=s._go)
+
+    def on_release(s): s.active = not s.active
+
+    def _go(s, *a):
+        Animation.cancel_all(s, "prog"); Animation(prog=1.0 if s.active else 0.0, d=.16, t="out_quad").start(s)
+
+    def _u(s, *a):
+        s._tc.rgba = mix(GRY, ACC, s.prog); s._tr.pos, s._tr.size = s.pos, s.size
+        d = s.height - dp(8); s._kn.size = (d, d); s._kn.pos = (s.x + dp(4) + s.prog * (s.width - d - dp(8)), s.y + dp(4))
+
+
+class Hero(ButtonBehavior, Widget):
+    """Big round connect button with glow and a pulse while connecting."""
+    col = ListProperty(ACC)
+    pulse = NumericProperty(0)
+
+    def __init__(s, **k):
+        super().__init__(**k); s._busy = False
+        s.bind(pos=s._d, size=s._d, col=s._d, pulse=s._d); s._d()
+
+    def busy(s, on):
+        if on == s._busy: return
+        s._busy = on; Animation.cancel_all(s, "pulse"); s.pulse = 0
+        if on:
+            a = Animation(pulse=1, d=1.2, t="out_quad") + Animation(pulse=0, d=.01); a.repeat = True; a.start(s)
+
+    def _d(s, *a):
+        s.canvas.clear(); cx, cy = s.center; r = min(s.width, s.height) / 2 - dp(34); c = s.col
+        with s.canvas:
+            for i in (3, 2, 1):
+                Color(c[0], c[1], c[2], .05 * (4 - i)); rr = r + dp(9) * i; Ellipse(pos=(cx - rr, cy - rr), size=(rr * 2, rr * 2))
+            if s.pulse:
+                Color(c[0], c[1], c[2], .5 * (1 - s.pulse)); rr = r + dp(10) + dp(26) * s.pulse; Line(circle=(cx, cy, rr), width=dp(2))
+            Color(*c); Ellipse(pos=(cx - r, cy - r), size=(r * 2, r * 2))
+            Color(1, 1, 1, .12); Ellipse(pos=(cx - r * .8, cy + r * .1), size=(r * 1.6, r * .8))
+            Color(1, 1, 1, 1); Line(circle=(cx, cy, r * .36, 38, 322), width=dp(3.4), cap="round")
+            Line(points=[cx, cy + r * .06, cx, cy + r * .5], width=dp(3.4), cap="round")
+
+
+class NavBtn(ButtonBehavior, Label):
+    act = BooleanProperty(False)
+
+    def __init__(s, **k):
+        k.setdefault("font_size", sp(12)); k.setdefault("bold", True)
+        super().__init__(**k)
+        with s.canvas.before:
+            s._c = Color(ACC[0], ACC[1], ACC[2], 0); s._r = RoundedRectangle(radius=[dp(14)])
+        s.bind(pos=s._u, size=s._u, act=s._u); s._u()
+
+    def _u(s, *a):
+        s._r.pos, s._r.size = (s.x + dp(3), s.y + dp(6)), (s.width - dp(6), s.height - dp(12))
+        s._c.rgba = (ACC[0], ACC[1], ACC[2], .22 if s.act else 0); s.color = SOFT if s.act else MUT
+
+
+class Field(TextInput):
+    def __init__(s, center=True, **k):
+        k.update(background_normal="", background_active="", background_color=(0, 0, 0, 0))
+        k.setdefault("foreground_color", TXT); k.setdefault("cursor_color", ACC); k.setdefault("font_size", sp(14))
+        super().__init__(**k)
+        s.center_v = center
+        with s.canvas.before:
+            s._c = Color(*FIELD); s._r = RoundedRectangle(radius=[dp(12)])
+        s.bind(pos=s._u, size=s._u, focus=s._u); s._u()
+
+    def _u(s, *a):
+        s._r.pos, s._r.size = s.pos, s.size; s._c.rgba = hx("26356a") if s.focus else FIELD
+        if s.center_v: s.padding = [dp(12), max(dp(6), (s.height - s.line_height) / 2), dp(12), dp(6)]
+
+
+class SOpt(SpinnerOption):
+    def __init__(s, **k):
+        super().__init__(**k)
+        s.background_normal = s.background_down = ""; s.background_color = CARD2; s.color = TXT; s.font_size = sp(13); s.height = dp(42)
+
+
+class Spin(Spinner):
+    def __init__(s, **k):
+        k.update(background_normal="", background_down="", background_color=(0, 0, 0, 0), option_cls=SOpt, color=TXT)
+        super().__init__(**k)
+        with s.canvas.before:
+            Color(*FIELD); s._r = RoundedRectangle(radius=[dp(12)])
+        s.bind(pos=s._u, size=s._u); s._u()
+
     def _u(s, *a): s._r.pos, s._r.size = s.pos, s.size
 
 
 class Row(Button):
-    idx, sel, cb = NumericProperty(0), BooleanProperty(False), ObjectProperty(None, allownone=True)
+    idx, sel, cb, bar = NumericProperty(0), BooleanProperty(False), ObjectProperty(None, allownone=True), ListProperty(GRN)
+
     def __init__(s, **k):
-        k.setdefault("background_normal", ""); k.setdefault("background_down", "")
+        k.setdefault("background_normal", ""); k.setdefault("background_down", ""); k["background_color"] = (0, 0, 0, 0); k["markup"] = True
         super().__init__(**k)
-        s.halign, s.valign, s.font_size = "left", "middle", sp(12)
-        s.bind(size=lambda *_: setattr(s, "text_size", (s.width - dp(16), s.height)), sel=s._c); s._c()
-    def _c(s, *a): s.background_color = ACC if s.sel else (.12, .16, .25, 1)
+        s.halign, s.valign, s.font_size, s.color, s.padding_x = "left", "middle", sp(12), TXT, dp(20)
+        with s.canvas.before:
+            s._c = Color(*CARD2); s._r = RoundedRectangle(radius=[dp(12)]); s._bc = Color(*GRN); s._b = RoundedRectangle(radius=[dp(2)])
+        s.bind(pos=s._u, size=s._u, sel=s._u, bar=s._u)
+        s.bind(size=lambda *_: setattr(s, "text_size", (s.width - dp(30), s.height))); s._u()
+
+    def _u(s, *a):
+        s._c.rgba = mix(CARD2, ACC, .6) if s.sel else CARD2
+        s._r.pos, s._r.size = (s.x, s.y + dp(2)), (s.width, s.height - dp(4))
+        s._bc.rgba = s.bar; s._b.pos, s._b.size = (s.x + dp(7), s.y + dp(13)), (dp(4), max(0, s.height - dp(26)))
+
     def on_release(s):
         if s.cb: s.cb(s.idx)
 
 
 class Table(BoxLayout):
+    """Scrollable, tap-to-select list. Each row: {key, title, sub, score, color}."""
     def __init__(s, h=340):
         super().__init__(orientation="vertical", size_hint_y=None, height=dp(h))
         s.rows, s.sel_key = [], None
         s.rv = RecycleView(bar_width=dp(4), viewclass=Row)
-        s.lay = RecycleBoxLayout(default_size=(None, dp(58)), default_size_hint=(1, None), size_hint_y=None, orientation="vertical", spacing=dp(3))
+        s.lay = RecycleBoxLayout(default_size=(None, dp(60)), default_size_hint=(1, None), size_hint_y=None, orientation="vertical", spacing=dp(2))
         s.lay.bind(minimum_height=s.lay.setter("height"))
         s.rv.add_widget(s.lay); s.add_widget(s.rv)
+
     def set_rows(s, rows): s.rows = rows; s._data()
+
     def _tap(s, i):
         if i < len(s.rows): s.sel_key = s.rows[i]["key"]; s._data()
+
     def _data(s):
-        s.rv.data = [{"text": fa(r["title"] + "\n" + r["sub"]), "idx": i, "sel": r["key"] == s.sel_key, "cb": s._tap,
-                      "color": r.get("color", TXT)} for i, r in enumerate(s.rows)]
+        out = []
+        for i, r in enumerate(s.rows):
+            t, sub = escape_markup(fa(r["title"])), escape_markup(fa(r["sub"]))
+            out.append({"text": f"[b]{t}[/b]\n[color=8d9bb8]{sub}[/color]", "idx": i, "sel": r["key"] == s.sel_key, "cb": s._tap, "bar": r.get("color", GRN)})
+        s.rv.data = out
+
     def selected(s): return next((r for r in s.rows if r["key"] == s.sel_key), None)
 
 
+# ---- main screen
 class UI(BoxLayout):
     def __init__(self, **k):
         super().__init__(orientation="vertical", **k)
         with self.canvas.before:
-            Color(*BG); self._bg = Rectangle(pos=self.pos, size=self.size)
+            Color(1, 1, 1, 1); self._bg = Rectangle(pos=self.pos, size=self.size, texture=vgrad(BG2, BG))
         self.bind(pos=lambda *_: setattr(self._bg, "pos", self.pos), size=lambda *_: setattr(self._bg, "size", self.size))
         self.cfg = load_cfg()
         self.q, self.stop = queue.Queue(), threading.Event()
         self.up_pool, self.ip_pool = Pool(), Pool()
+        for h, lat in self.cfg.get("ip_pool", []): self.ip_pool.add("IP", h, 443, lat)
         self.srv = self.fwd = self.wl = None; self.qst, self.cur = "idle", "quick"
         self.tbl, self.data, self.dirty, self.prog, self.pool_views, self.logs = {}, {}, set(), {}, [], []
         self._lan, self._lan_t, self.prev, self._pt = "127.0.0.1", 0, (0, 0, time.time()), 0
         self.qlog = lambda m: self.q.put(("log", m))
-        
-        self.sm = ScreenManager(transition=NoTransition()); self.add_widget(self.sm)
-        for key, fn in (("quick", self.page_quick), ("dash", self.page_dash), ("blackout", self.page_blackout),
-                        ("scan", self.page_scan), ("online", self.page_online), ("pool", self.page_pool), ("log", self.page_log)):
+        self.vpn = VpnBridge(self.qlog)
+        self.quick = QuickLink(self.up_pool, lambda m: self.q.put(("qstat", m)),
+                               lambda st, info=None: self.q.put(("qstate", st, info)), self.quick_server)
+        self.sm = ScreenManager(transition=FadeTransition(duration=.12)); self.add_widget(self.sm)
+        for key, fn in (("quick", self.page_quick), ("dash", self.page_dash), ("scan", self.page_scan),
+                        ("online", self.page_online), ("pool", self.page_pool), ("log", self.page_log)):
             self.page(key, fn)
-            
-        nav = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(2), padding=dp(2)); self.nav = {}
-        for key, t in NAV:
-            b = RBtn(text=fa(t), font_size=sp(11), bg=CARD, on_release=lambda b, key=key: self.show(key)); nav.add_widget(b); self.nav[key] = b
+        nav = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(2), padding=[dp(6), dp(2)]); self.nav = {}
+        with nav.canvas.before:
+            Color(*CARD); nr = Rectangle(); Color(*LINE); nl = Rectangle()
+        nav.bind(pos=lambda *_: (setattr(nr, "pos", nav.pos), setattr(nl, "pos", (nav.x, nav.top - 1))),
+                 size=lambda *_: (setattr(nr, "size", nav.size), setattr(nl, "size", (nav.width, 1))))
+        for key, t in reversed(NAV):  # RTL: first tab on the right
+            b = NavBtn(text=fa(t), on_release=lambda b, key=key: self.show(key)); nav.add_widget(b); self.nav[key] = b
         self.add_widget(nav); self.show("quick")
         Clock.schedule_interval(self.poll, 0.5); Clock.schedule_interval(self.tick, 0.4)
 
+    # ----- layout helpers -----
     def page(self, key, fn):
         sv = ScrollView(do_scroll_x=False, bar_width=dp(3))
-        col = BoxLayout(orientation="vertical", size_hint_y=None, padding=dp(10), spacing=dp(10))
+        col = BoxLayout(orientation="vertical", size_hint_y=None, padding=[dp(14), dp(14), dp(14), dp(20)], spacing=dp(12))
         col.bind(minimum_height=col.setter("height")); sv.add_widget(col)
         s = Screen(name=key); s.add_widget(sv); self.sm.add_widget(s); fn(col)
 
     @staticmethod
-    def r(*ws, h=46):
-        b = BoxLayout(size_hint_y=None, height=dp(h), spacing=dp(6))
+    def r(*ws, h=48):
+        b = BoxLayout(size_hint_y=None, height=dp(h), spacing=dp(8))
         for w in ws: w.size_hint_y = 1; b.add_widget(w)
         return b
 
     def ent(self, val="", w=110, num=True):
-        return TextInput(text=str(val), multiline=False, input_filter="int" if num else None, size_hint_x=None, width=dp(w),
-                         background_color=(.14, .19, .29, 1), foreground_color=TXT, cursor_color=TXT, padding=[dp(8), dp(12)], font_size=sp(14))
+        return Field(text=str(val), multiline=False, input_filter="int" if num else None, size_hint_x=None, width=dp(w))
 
+    # RTL rows: control on the left, label on the right
     def fld(self, parent, text, val):
-        t = self.ent(val); parent.add_widget(self.r(WL(text, 13), t)); return t
+        t = self.ent(val); parent.add_widget(self.r(t, WL(text, 13))); return t
 
     def sw(self, parent, text, key, default=True):
-        s = Switch(active=bool(self.cfg.get(key, default)), size_hint_x=None, width=dp(90)); parent.add_widget(self.r(WL(text, 13), s)); return s
+        t = Toggle(self.cfg.get(key, default)); a = AnchorLayout(size_hint_x=None, width=dp(64)); a.add_widget(t)
+        parent.add_widget(self.r(a, WL(text, 13))); return t
 
     def spin(self, parent, text, val, values):
-        s = Spinner(text=val, values=values, size_hint_x=None, width=dp(210), background_normal="", background_color=(.14, .19, .29, 1))
-        parent.add_widget(self.r(WL(text, 13), s)); return s
+        s = Spin(text=val, values=values, size_hint_x=None, width=dp(200), font_size=sp(13))
+        parent.add_widget(self.r(s, WL(text, 13))); return s
+
+    def title(self, c, text, col=ACC):
+        c.add_widget(self.r(WL(text, 15, TXT, True), Bar(col), h=28))
 
     def head(self, c, title, sub):
-        c.add_widget(WL(title, 22, bold=True)); c.add_widget(WL(sub, 12, MUT))
+        c.add_widget(WL(title, 23, TXT, True)); c.add_widget(WL(sub, 12, MUT))
 
     def table(self, parent, key):
         t = Table(); self.tbl[key], self.data[key] = t, []; parent.add_widget(t); return t
 
     def show(self, k):
         self.cur = k; self.sm.current = k
-        for n, b in self.nav.items(): b.bg = ACC if n == k else CARD
+        for n, b in self.nav.items(): b.act = (n == k)
 
     def log(self, m):
         self.logs.append(time.strftime("%H:%M:%S  ") + str(m)); del self.logs[:-150]
@@ -469,136 +1183,383 @@ class UI(BoxLayout):
     def copy(self, v):
         if v: Clipboard.copy(str(v)); self.log(f"کپی شد: {v}")
 
+    # ----- pages -----
     def page_quick(self, c):
-        c.add_widget(WL("NetFree - VPN واقعی", 24, ACC, True, center=True))
-        c.add_widget(WL("اتصال سطح سیستم همراه با علامت کلید (VPNService)", 12, MUT, center=True))
-        a = AnchorLayout(size_hint_y=None, height=dp(200))
-        self.q_btn = RBtn(text=fa("اتصال"), font_size=sp(26), bg=GRY, size_hint=(None, None), size=(dp(180), dp(180)), circle=True,
-                          on_release=lambda *_: self.quick_toggle())
-        a.add_widget(self.q_btn); c.add_widget(a)
-        self.q_status = WL("آماده اتصال واقعی", 16, TXT, True, center=True)
-        self.q_info = WL("", 12, MUT, center=True)
-        c.add_widget(self.q_status); c.add_widget(self.q_info)
-        k = Card()
-        self.qlan = self.sw(k, "مجوز عبور کل سیستم", "qlan", True)
-        c.add_widget(k)
-
-    def page_blackout(self, c):
-        self.head(c, "Hardest Blackout", "حالت اضطراری قطعی کامل اینترنت و سانسور سنگین")
-        k = Card()
-        k.add_widget(WL("در شرایط قطعی سراسری یا بلاک شدن کامل پروتکل‌ها:", 13, bold=True))
-        k.add_widget(WL("1. فعال‌سازی حالت TLS Fragment پیشرفته\n2. سوییچ روی پورت‌های امن و لایه ۴ (پورت ۴۴۳ و ۵۳)\n3. استفاده از مسیرهای جایگزین Cloudflare Edge با پدینگ تصادفی بسته‌ها", 12, MUT))
-        self.hb_sw = self.sw(k, "فعال‌سازی حالت مقاومت حداکثری", "hard_blackout", True)
-        c.add_widget(k)
-        
-        k2 = Card()
-        k2.add_widget(WL("قوی‌ترین متدهای عبور:", 14, bold=True))
-        k2.add_widget(WL("• متد Domain Fronting روی SNIهای حیاتی\n• تکنیک Split-Packet با تأخیر تصادفی (Anti-DPI)\n• فوروارد مستقیم ترافیک به لبه‌های پنهان CDN", 12, MUT))
-        c.add_widget(k2)
+        c.add_widget(WL("NetFree", 30, ACC, True, center=True)); c.add_widget(WL("اتصال هوشمند و پایدار", 12, MUT, center=True))
+        a = AnchorLayout(size_hint_y=None, height=dp(250))
+        self.hero = Hero(size_hint=(None, None), size=(dp(250), dp(250)), on_release=lambda *_: self.quick_toggle()); a.add_widget(self.hero); c.add_widget(a)
+        self.q_cap = WL("برای اتصال لمس کنید", 12, MUT, center=True)
+        self.q_status, self.q_info, self.q_vpn = WL("آماده اتصال", 17, TXT, True, center=True), WL("", 12, MUT, center=True), WL("", 12, MUT, center=True)
+        for w in (self.q_cap, self.q_status, self.q_info, self.q_vpn): c.add_widget(w)
+        self.q_down, self.q_up, self.q_act = Tile("دانلود"), Tile("آپلود"), Tile("اتصال فعال")
+        c.add_widget(self.r(self.q_act, self.q_up, self.q_down, h=78))
+        k = Card(); self.title(k, "تنظیمات اتصال")
+        self.qvpn = self.sw(k, "فعال‌سازی VPN (علامت کلید + پروکسی سیستم)", "qvpn", True)
+        self.qlan = self.sw(k, "اشتراک با دستگاه‌های دیگر (هات‌اسپات)", "qlan", False)
+        self.qsec = self.sw(k, "فقط مسیرهای تاییدشده (یوتیوب + سرعت)", "qsec", True); c.add_widget(k)
+        self.q_addr = WL("", 17, ACC, True, center=True); c.add_widget(self.q_addr)
+        c.add_widget(B("کپی آدرس", lambda: self.copy(self.q_addr.raw), GRY))
+        c.add_widget(WL("با فعال بودن VPN، برنامه‌هایی که پروکسی سیستم را رعایت می‌کنند (مرورگرها و بسیاری از اپ‌ها) خودکار از این مسیر عبور می‌کنند. "
+                        "برنامه‌هایی مثل تلگرام باید دستی روی 127.0.0.1 و همین پورت (SOCKS5) تنظیم شوند.", 11, MUT, center=True))
 
     def page_dash(self, c):
-        self.head(c, "داشبورد اتصال", "وضعیت سرویس‌های محلی و ترافیک شبکه")
-        k = Card(); self.v_state, self.v_speed, self.v_conn = WL("", 15, bold=True), WL("", 13), WL("", 13)
-        for w in (self.v_state, self.v_speed, self.v_conn): k.add_widget(w)
+        self.head(c, "داشبورد اتصال", "سرویس را روشن کنید، سپس آدرس را در برنامه وارد کنید")
+        k = Card(); self.v_state, self.v_speed, self.v_conn = WL("", 16, bold=True), WL("", 13), WL("", 13)
+        self.s_socks, self.s_fwd = WL("", 12, MUT), WL("", 12, MUT)
+        for w in (self.v_state, self.v_speed, self.v_conn, self.s_socks, self.s_fwd): k.add_widget(w)
+        c.add_widget(k)
+
+        k = Card(); self.title(k, "SOCKS5 / HTTP Server")
+        self.port = self.fld(k, "پورت", self.cfg.get("port", 1080)); self.lan = self.sw(k, "اشتراک روی شبکه (هات‌اسپات)", "lan", False)
+        self.frag = self.sw(k, "TLS fragment", "frag"); self.doh = self.sw(k, "DNS امن (DoH)", "doh")
+        self.lbl_up = WL("", 12, MUT); k.add_widget(self.lbl_up)
+        self.b_socks = B("روشن کردن سرور", self.toggle_socks); k.add_widget(self.b_socks)
+        k.add_widget(self.r(B("تست اتصال", self.test_socks, GRY), B("کپی آدرس", lambda: self.copy(self.addr.raw), GRY)))
+        k.add_widget(B("حذف آپ‌استریم‌ها", lambda: (self.up_pool.clear(), self.log("استخر آپ‌استریم خالی شد")), GRY))
+        self.addr = WL("", 17, ACC, True, center=True); k.add_widget(self.addr); c.add_widget(k)
+
+        k = Card(); self.title(k, "Cloudflare IP Forwarder", ACC2)
+        self.fport = self.fld(k, "پورت", self.cfg.get("fport", 10443)); self.flan = self.sw(k, "اشتراک روی شبکه", "flan", False)
+        self.ffrag = self.sw(k, "TLS fragment", "ffrag"); self.fsni = self.spin(k, "SNI", self.cfg.get("fsni", SNIS[0]), SNIS)
+        self.lbl_ip = WL("", 12, MUT); k.add_widget(self.lbl_ip)
+        self.b_fwd = B("روشن کردن فوروارد", self.toggle_fwd); k.add_widget(self.b_fwd)
+        k.add_widget(self.r(B("کپی آدرس", lambda: self.copy(self.faddr.raw), GRY),
+                            B("حذف IPها", lambda: (self.ip_pool.clear(), self.log("استخر IP خالی شد")), GRY)))
+        self.faddr = WL("", 17, ACC, True, center=True); k.add_widget(self.faddr)
+        k.add_widget(WL("کانفیگ V2Ray/Xray (آدرس سرور) را روی این آدرس بگذارید؛ برنامه خودش سالم‌ترین IP را انتخاب و در صورت خرابی عوض می‌کند.", 11, MUT))
         c.add_widget(k)
 
     def page_scan(self, c):
-        self.head(c, "اسکن IP کلودفلر", "پیدا کردن بهترین و تمیزترین آی‌پی‌ها")
-        k = Card()
-        self.sni1 = self.spin(k, "SNI", self.cfg.get("sni1", SNIS[0]), SNIS)
-        self.n1 = self.fld(k, "تعداد IP", 500)
-        k.add_widget(B("شروع اسکن", lambda: self.log("شروع اسکن آی‌پی..."), ACC))
-        self.prog["scan"] = ProgressBar(max=1, size_hint_y=None, height=dp(10)); k.add_widget(self.prog["scan"])
-        c.add_widget(k)
-        k2 = Card(); self.table(k2, "scan"); c.add_widget(k2)
+        self.head(c, "اسکن IP کلودفلر", "اسکن با چند نمونه، جیتر و تایید واقعی کلودفلر")
+        k = Card(); self.title(k, "تنظیمات اسکن"); self.sni1 = self.spin(k, "SNI", self.cfg.get("sni1", SNIS[0]), SNIS)
+        self.n1 = self.fld(k, "تعداد IP برای تست", self.cfg.get("n1", 2000)); self.smp = self.fld(k, "نمونه برای هر IP", 3)
+        self.w1 = self.fld(k, "هم‌زمان", 100); self.ver = self.sw(k, "تایید کلودفلر", "ver")
+        self.unl = self.sw(k, "رنج IP نامحدود", "unl", False)
+        self.rng_info = WL("", 11, MUT); k.add_widget(self.rng_info)
+        k.add_widget(WL("رنج‌ها (هر خط یک CIDR):", 12, MUT))
+        saved = self.cfg.get("ranges2")
+        self.rng = Field(text="\n".join(saved) if saved else "\n".join(CF_NORMAL + CF_EXTRA if self.unl.active else CF_NORMAL), multiline=True,
+                         center=False, size_hint_y=None, height=dp(150), font_size=sp(11), padding=[dp(10), dp(10)])
+        k.add_widget(self.rng); self._rng_note()
+        self.unl.bind(active=self.reset_ranges)
+        k.add_widget(self.r(B("شروع اسکن", self.scan, ACC), B("توقف", self.stop.set, RED)))
+        k.add_widget(B("بازنشانی رنج‌ها", self.reset_ranges, GRY))
+        self.prog["scan"] = Prog(); k.add_widget(self.prog["scan"]); c.add_widget(k)
+        k = Card(); self.title(k, "نتایج", GRN)
+        k.add_widget(self.r(B("اتصال به IP انتخابی", lambda: self.connect_ip(False), GRN, size=12), B("اتصال خودکار (۵ بهترین)", lambda: self.connect_ip(True), GRN, size=12)))
+        k.add_widget(self.r(B("افزودن به استخر", self.add_ip), B("کپی IP", lambda: self.copy((self.sel("scan") or {}).get("ip")), GRY)))
+        self.table(k, "scan"); c.add_widget(k)
 
     def page_online(self, c):
-        self.head(c, "پروکسی آنلاین", "دریافت پروکسی‌های فعال سابرساینس")
-        k = Card()
-        k.add_widget(B("دریافت پروکسی", lambda: self.log("دریافت لیست پروکسی..."), ACC))
-        c.add_widget(k)
-        k2 = Card(); self.table(k2, "online"); c.add_widget(k2)
+        self.head(c, "پروکسی آنلاین", "دریافت لیست‌های عمومی و تست واقعی (تونل، تاخیر، سلامت TLS)")
+        k = Card(); self.kind = self.spin(k, "نوع", "SOCKS5", ("SOCKS5", "HTTP"))
+        self.n2 = self.fld(k, "تعداد", self.cfg.get("n2", 400)); self.w2 = self.fld(k, "هم‌زمان", 120); self.sec = self.sw(k, "فقط TLS امن", "sec", False)
+        k.add_widget(self.r(B("دریافت و تست", self.online), B("توقف", self.stop.set, RED)))
+        self.prog["online"] = Prog(); k.add_widget(self.prog["online"]); c.add_widget(k)
+        k = Card(); self.title(k, "نتایج", GRN)
+        k.add_widget(self.r(B("اتصال (انتخابی)", lambda: self.connect_proxy(False), GRN, size=12), B("اتصال خودکار (۵ بهترین)", lambda: self.connect_proxy(True), GRN, size=12)))
+        k.add_widget(self.r(B("افزودن به استخر", self.add_proxy), B("کپی", lambda: self.copy((self.sel("online") or {}).get("addr")), GRY)))
+        self.table(k, "online"); c.add_widget(k)
 
     def page_pool(self, c):
-        self.head(c, "استخر اتصال", "مدیریت مسیرها و آپ‌استریم‌ها")
-        c.add_widget(Card())
+        self.head(c, "استخر اتصال", "هر مورد سالم‌تر و سریع‌تر باشد اولویت دارد؛ موارد خراب موقتاً کنار گذاشته می‌شوند")
+        for i, (title, pool) in enumerate((("IPهای کلودفلر (برای Forwarder)", self.ip_pool), ("پروکسی‌های آپ‌استریم (برای SOCKS5)", self.up_pool))):
+            k = Card(); self.title(k, title, ACC if i else ACC2); t = self.table(k, "pool_%d" % i); self.pool_views.append((t, pool))
+            k.add_widget(self.r(B("حذف انتخابی", lambda t=t, pl=pool: self.pool_rm(t, pl), GRY), B("پاک کردن همه", pool.clear, RED))); c.add_widget(k)
 
     def page_log(self, c):
-        self.head(c, "لاگ سیستم", "گزارش رویدادها")
-        self.log_lbl = WL("", 11, MUT, smart=False); self.log_lbl.halign = "left"; c.add_widget(self.log_lbl)
+        self.head(c, "لاگ", "رویدادهای برنامه")
+        k = Card(); self.log_lbl = WL("", 11, MUT, smart=False); self.log_lbl.halign = "left"; k.add_widget(self.log_lbl); c.add_widget(k)
 
-    def quick_toggle(self):
-        if self.qst == "connected":
-            self.set_quick("idle")
-            self.stop_vpn_service()
-        else:
-            self.set_quick("connected", {"ip": "10.0.0.2 (VPN Active)", "loc": "Cloudflare Tunnel"})
-            self.start_vpn_service()
-
-    def start_vpn_service(self):
-        """Invoke Android VpnService to establish a real system tunnel and show the key icon."""
-        if platform == "android":
-            try:
-                from jnius import autoclass
-                PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                activity = PythonActivity.mActivity
-                Intent = autoclass("android.content.Intent")
-                VpnService = autoclass("android.net.VpnService")
-                
-                intent = VpnService.prepare(activity)
-                if intent is not None:
-                    activity.startActivityForResult(intent, 0)
-                else:
-                    # Permission already granted, start our background VPN builder service
-                    self.log("سرویس VPN سیستم با موفقیت فعال شد (علامت کلید نمایان شد).")
-            except Exception as e:
-                self.log(f"خطا در راه‌اندازی VPNService: {e}")
-        else:
-            self.log("اتصال واقعی VPN در محیط دسکتاپ شبیه‌سازی شد.")
-
-    def stop_vpn_service(self):
-        self.log("اتصال VPN قطع شد.")
+    # ----- quick connect -----
+    VPN_MSG = {"ask": ("در انتظار اجازه VPN ...", AMB), "starting": ("در حال فعال‌سازی VPN ...", AMB),
+               "on": ("VPN فعال است (علامت کلید در نوار وضعیت)", GRN),
+               "old": ("VPN فعال شد، اما اندروید زیر ۱۰ پروکسی سیستم را نمی‌پذیرد؛ پروکسی را دستی بدهید", AMB),
+               "denied": ("اجازه VPN داده نشد؛ فقط پروکسی محلی کار می‌کند", RED),
+               "missing": ("سرویس VPN در این بیلد نیست؛ طبق راهنما دوباره بیلد کنید", RED)}
 
     def set_quick(self, st, info=None):
         self.qst = st
-        t, col = {"idle": ("اتصال", GRY), "connected": ("قطع", GRN)}.get(st, ("تلاش", RED))
-        self.q_btn.text, self.q_btn.bg = fa(t), col
-        if st == "connected" and info:
-            self.q_status.set("متصل - VPN واقعی فعال است (کلید ظاهر شد)"); self.q_status.color = GRN
-            self.q_info.set(f"خروجی: {info['ip']} | حالت Hardest Blackout فعال")
+        col, cap = {"idle": (ACC, "برای اتصال لمس کنید"), "connecting": (AMB, "برای لغو لمس کنید"),
+                    "connected": (GRN, "برای قطع اتصال لمس کنید"), "failed": (RED, "برای تلاش مجدد لمس کنید")}[st]
+        self.hero.col = col; self.hero.busy(st == "connecting"); self.q_cap.set(cap)
+        if st == "connecting": self.q_status.set("در حال اتصال ..."); self.q_status.color = AMB
+        elif st == "connected" and info:
+            self.q_status.set("متصل - دسترسی یوتیوب تایید شد"); self.q_status.color = GRN
+            self.q_info.set(f"IP خروجی: {info['ip']} ({info['loc']})   تاخیر: {info['ms']:.0f} ms")
+            if self.qvpn.active and not self.vpn.want: self.vpn.start(self.srv.port if self.srv else 1080)
+        elif st == "failed": self.q_status.set(info or "ناموفق"); self.q_status.color = RED; self.q_info.set(""); self.vpn.stop()
+        elif st == "idle": self.q_status.set("آماده اتصال"); self.q_status.color = TXT; self.q_info.set(""); self.vpn.stop()
+
+    def quick_toggle(self):
+        if self.qst in ("connecting", "connected"): self.quick.cancel(); self.stop_socks(); self.vpn.stop(); self.set_quick("idle")
         else:
-            self.q_status.set("آماده اتصال"); self.q_status.color = TXT; self.q_info.set("")
+            self.set_quick("connecting"); self.quick.start(self.qlan.active, self.qsec.active)
+            if self.qvpn.active: self.vpn.request()  # system permission dialog (first time only)
+
+    def quick_server(self, lan):
+        """Called from the worker thread: reuse a running server or start one (waits out a server that is stopping)."""
+        for _ in range(40):
+            if not (self.srv and self.srv.stopping): break
+            time.sleep(0.1)
+        if self.srv and self.srv.state == "running" and not self.srv.stopping: return self.srv
+        if self.srv: return None
+        srv = Socks("0.0.0.0" if lan else "127.0.0.1", self.port_of(self.port, 1080), self.qlog, self.up_pool, True, True)
+        self.srv = srv; threading.Thread(target=srv.run, daemon=True).start()
+        for _ in range(30):
+            if srv.state != "starting": break
+            time.sleep(0.1)
+        return srv if srv.state == "running" else None
+
+    # ----- table / jobs -----
+    def sel(self, key): return self.tbl[key].selected()
+
+    def refresh_tree(self, key):
+        rows = sorted(self.data[key], key=lambda r: r["score"])[:600]
+        for r in rows: r["color"] = GRN if r["score"] < 300 else AMB if r["score"] < 700 else RED
+        self.tbl[key].set_rows(rows)
+
+    def start_job(self, key, jobs, fn, workers):
+        self.stop.clear(); self.data[key] = []; self.refresh_tree(key); self.prog[key].value = 0
+        self.log(f"تست {len(jobs)} هدف با {workers} رشته ...")
+
+        def wrap(j): return None if self.stop.is_set() else fn(j)
+
+        def go():
+            done = 0
+            with ThreadPoolExecutor(workers) as ex:
+                for f in as_completed([ex.submit(wrap, j) for j in jobs]):
+                    done += 1
+                    try: r = f.result()
+                    except Exception: r = None
+                    if r: self.q.put(("row", key, r))
+                    if done % 5 == 0 or done == len(jobs): self.q.put(("prog", key, done / len(jobs)))
+            self.q.put(("done", key))
+        threading.Thread(target=go, daemon=True).start()
 
     def poll(self, dt=0):
         try:
             while True:
                 k, *a = self.q.get_nowait()
-                if k == "log": self.log(a[0])
-        except queue.Empty: pass
+                if k == "row": self.data[a[0]].append(a[1]); self.dirty.add(a[0])
+                elif k == "call": a[0]()
+                elif k == "qstat":
+                    if self.qst != "idle": self.q_status.set(a[0])
+                elif k == "qstate": self.set_quick(*a)
+                elif k == "prog": self.prog[a[0]].value = a[1]
+                elif k == "done":
+                    self.dirty.add(a[0]); self.prog[a[0]].value = 1
+                    self.log(f"پایان: {len(self.data[a[0]])} مورد سالم" + (" (متوقف شد)" if self.stop.is_set() else ""))
+                else: self.log(a[0])
+        except queue.Empty:
+            pass
+        for k in list(self.dirty): self.refresh_tree(k)
+        self.dirty.clear()
 
+    # ----- scan / online -----
+    def _active_ranges(self): return CF_NORMAL + CF_EXTRA if self.unl.active else CF_NORMAL
+
+    def _rng_note(self):
+        n = sum(x.num_addresses for x in merge_nets([ipaddress.ip_network(x) for x in self._active_ranges()]))
+        self.rng_info.set(("حالت نامحدود: همه بلوک‌های کلودفلر + بلوک‌های اضافه و پراکنده" if self.unl.active else "حالت عادی: فقط رنج‌های رسمی کلودفلر") + f" ({n:,} آدرس)")
+
+    def reset_ranges(self, *a):
+        self.rng.text = "\n".join(self._active_ranges()); self._rng_note()
+        self.log("رنج IP نامحدود فعال شد" if self.unl.active else "رنج IP عادی (رسمی کلودفلر) بازنشانی شد")
+
+    def scan(self):
+        try: n, smp, w = int(self.n1.text), max(1, int(self.smp.text)), max(1, int(self.w1.text))
+        except ValueError: return self.log("مقادیر عددی نامعتبر است")
+        nets = []
+        for l in self.rng.text.splitlines():
+            l = l.split("#")[0].strip()
+            if not l: continue
+            try: nets.append(ipaddress.ip_network(l, strict=False))
+            except ValueError: self.log(f"رنج نامعتبر: {l}")
+        nets = merge_nets(nets)
+        if not nets: return self.log("رنج معتبری وارد نشده")
+        out = sample_ips(nets, n)
+        self.log(f"{len(nets)} رنج، {sum(x.num_addresses for x in nets):,} آدرس؛ نمونه‌برداری {len(out)} IP")
+        sni, ver = self.sni1.text, self.ver.active
+
+        def fn(ip):
+            r = probe_ip(ip, sni, smp, ver)
+            if r: return {"key": ip, "ip": ip, "lat": r["tls"], "score": r["score"], "title": ip,
+                          "sub": f"TLS {r['tls']:.0f} | TCP {r['tcp']:.0f} | jit {r['jit']:.0f} | {r['ok']} | score {r['score']:.0f}"}
+        self.start_job("scan", out, fn, w)
+
+    def online(self):
+        k = self.kind.text
+        try: n, w = int(self.n2.text), max(1, int(self.w2.text))
+        except ValueError: return self.log("مقادیر عددی نامعتبر است")
+        only = self.sec.active
+        self.log("دریافت لیست پروکسی‌ها ...")
+
+        def go():
+            jobs = fetch_proxies(k, n, self.qlog)
+            if not jobs: self.q.put(("log", "لیستی دریافت نشد؛ اینترنت/دسترسی به GitHub را بررسی کنید")); return
+            self.q.put(("call", lambda: self.start_job("online", jobs, fn, w)))
+
+        def fn(hp):
+            r = proxy_probe(k, *hp)
+            if not r or (only and not r["secure"]): return None
+            return {"key": r["addr"], "kind": k, "addr": r["addr"], "host": r["host"], "port": r["port"], "lat": r["lat"], "score": r["score"],
+                    "title": f"{k}  {r['addr']}", "sub": f"ping {r['lat']:.0f} | TLS {'ok' if r['secure'] else 'x'} | jit {r['jit']:.0f} | score {r['score']:.0f}"}
+        threading.Thread(target=go, daemon=True).start()
+
+    # ----- connect actions -----
+    def top(self, key, n=5): return sorted(self.data[key], key=lambda r: r["score"])[:n]
+
+    def connect_ip(self, auto):
+        rows = [r for r in (self.top("scan") if auto else [self.sel("scan")]) if r]
+        if not rows: return self.log("ابتدا اسکن کنید و یک IP انتخاب کنید")
+        self.ip_pool.clear()
+        for r in rows: self.ip_pool.add("IP", r["ip"], 443, r["lat"])
+        self.log(f"{len(rows)} IP در استخر قرار گرفت"); self.start_fwd(); self.show("dash")
+
+    def add_ip(self):
+        r = self.sel("scan")
+        if r: self.ip_pool.add("IP", r["ip"], 443, r["lat"]); self.log(f"{r['ip']} به استخر IP اضافه شد")
+
+    def connect_proxy(self, auto):
+        rows = [r for r in (self.top("online") if auto else [self.sel("online")]) if r]
+        if not rows: return self.log("ابتدا تست کنید و یک پروکسی انتخاب کنید")
+        self.up_pool.clear()
+        for r in rows: self.up_pool.add(r["kind"], r["host"], r["port"], r["lat"])
+        self.log(f"{len(rows)} پروکسی آپ‌استریم تنظیم شد"); self.start_socks(); self.show("dash")
+
+    def add_proxy(self):
+        r = self.sel("online")
+        if r: self.up_pool.add(r["kind"], r["host"], r["port"], r["lat"]); self.log(f"{r['addr']} به استخر آپ‌استریم اضافه شد")
+
+    def pool_rm(self, t, pool):
+        r = t.selected()
+        if r: pool.remove(r["ent"]); t.sel_key = None
+
+    # ----- servers -----
+    def port_of(self, e, d):
+        try: return int(e.text)
+        except ValueError: return d
+
+    def toggle_socks(self): self.stop_socks() if self.srv else self.start_socks()
+
+    def start_socks(self):
+        if self.srv: return
+        host = "0.0.0.0" if self.lan.active else "127.0.0.1"
+        self.srv = Socks(host, self.port_of(self.port, 1080), self.qlog, self.up_pool, self.frag.active, self.doh.active)
+        threading.Thread(target=self.srv.run, daemon=True).start()
+
+    def stop_socks(self):
+        if self.srv: self.srv.stop()
+
+    def toggle_fwd(self): self.stop_fwd() if self.fwd else self.start_fwd()
+
+    def start_fwd(self):
+        if self.fwd: return
+        if not len(self.ip_pool): return self.log("استخر IP خالی است؛ ابتدا از تب اسکن IP اضافه کنید")
+        host = "0.0.0.0" if self.flan.active else "127.0.0.1"
+        self.fwd = Forwarder(host, self.port_of(self.fport, 10443), self.qlog, self.ip_pool, self.ffrag.active, self.fsni.text)
+        threading.Thread(target=self.fwd.run, daemon=True).start()
+
+    def stop_fwd(self):
+        if self.fwd: self.fwd.stop()
+
+    def test_socks(self):
+        if not self.srv or self.srv.state != "running": return self.log("ابتدا سرور SOCKS5 را روشن کنید")
+        port = self.srv.port; self.log("در حال تست اتصال از مسیر سرور ...")
+        threading.Thread(target=lambda: self.q.put(("log", (lambda m: f"تست موفق: {m:.0f} ms" if m else "تست ناموفق (آپ‌استریم یا شبکه مشکل دارد)")(proxy_ping("SOCKS5", "127.0.0.1", port, 15)))), daemon=True).start()
+
+    def awake(self, on):
+        """Keep the CPU alive while a server runs (needs WAKE_LOCK permission)."""
+        if platform != "android": return
+        try:
+            if on and not self.wl:
+                from jnius import autoclass
+                act = autoclass("org.kivy.android.PythonActivity").mActivity
+                self.wl = act.getSystemService(autoclass("android.content.Context").POWER_SERVICE).newWakeLock(1, "netfree:srv"); self.wl.acquire()
+            elif not on and self.wl: self.wl.release(); self.wl = None
+        except Exception:
+            pass
+
+    # ----- periodic UI refresh -----
     def tick(self, dt=0):
-        pass
+        now = time.time()
+        if self.srv and self.srv.state == "stopped": self.srv = None
+        if self.fwd and self.fwd.state == "stopped": self.fwd = None
+        if self.srv: self.srv.frag, self.srv.doh = self.frag.active, self.doh.active
+        if self.fwd: self.fwd.frag, self.fwd.sni = self.ffrag.active, self.fsni.text
+        if now - self._lan_t > 30: self._lan, self._lan_t = lan_ip(), now
+        self.awake(bool(self.srv or self.fwd)); self.vpn.refresh()
+
+        run = lambda x: bool(x) and x.state == "running"
+        for lbl, name, x in ((self.s_socks, "SOCKS5", self.srv), (self.s_fwd, "Forwarder", self.fwd)):
+            lbl.set(f"{name}: {'روشن' if run(x) else 'خاموش'}"); lbl.color = GRN if run(x) else MUT
+        self.b_socks.text, self.b_socks.bg = fa("خاموش کردن" if self.srv else "روشن کردن سرور"), RED if self.srv else ACC
+        self.b_fwd.text, self.b_fwd.bg = fa("خاموش کردن" if self.fwd else "روشن کردن فوروارد"), RED if self.fwd else ACC
+        self.addr.set(f"socks5://{self._lan if self.srv.host == '0.0.0.0' else '127.0.0.1'}:{self.srv.port}" if self.srv else "")
+        self.faddr.set(f"{self._lan if self.fwd.host == '0.0.0.0' else '127.0.0.1'}:{self.fwd.port}" if self.fwd else "")
+        self.lbl_up.set(f"آپ‌استریم: {len(self.up_pool)} پروکسی (با failover خودکار)" if len(self.up_pool) else "آپ‌استریم: مستقیم (بدون پروکسی)")
+        self.lbl_ip.set(f"استخر: {len(self.ip_pool)} IP" + (" - بهترین: " + self.ip_pool.ordered()[0]["host"] if len(self.ip_pool) else ""))
+
+        srvs = [x for x in (self.srv, self.fwd) if x]
+        up, dn = sum(x.stats.up for x in srvs), sum(x.stats.down for x in srvs)
+        pu, pd, pt = self.prev; dt = max(0.05, now - pt); ru, rd = max(0, up - pu) / dt, max(0, dn - pd) / dt
+        self.v_speed.set(f"Down {fmt(rd)}/s    Up {fmt(ru)}/s"); self.prev = (up, dn, now)
+        act = sum(x.stats.active for x in srvs)
+        self.v_conn.set(f"{act} فعال | {sum(x.stats.conns for x in srvs)} کل | {sum(x.stats.fail for x in srvs)} خطا")
+        on = any(run(x) for x in srvs)
+        self.v_state.set("متصل" if on else "خاموش"); self.v_state.color = GRN if on else MUT
+        self.q_down.val.set(fmt(rd) + "/s"); self.q_up.val.set(fmt(ru) + "/s"); self.q_act.val.set(str(act)); self.q_addr.set(self.addr.raw)
+        m = self.VPN_MSG.get(self.vpn.state)
+        if self.vpn.state == "err": m = (f"خطای VPN: {self.vpn.err}"[:90], RED)
+        self.q_vpn.set(m[0] if m else ""); self.q_vpn.color = m[1] if m else MUT
+
+        if self.cur == "pool" and now - self._pt > 1.5:
+            self._pt = now
+            for t, pool in self.pool_views:
+                rows = []
+                for e in pool.snapshot():
+                    cd = e["until"] - now
+                    st = "سالم" if e["fails"] == 0 else (f"استراحت {cd:.0f}s" if cd > 0 else "ناپایدار")
+                    ad = f"{e['host']}:{e['port']}"
+                    rows.append({"key": ad, "title": ad, "ent": e, "score": 0, "color": GRN if e["fails"] == 0 else AMB if cd <= 0 else RED,
+                                 "sub": f"{e['kind']} | ping {(format(e['lat'], '.0f') if e['lat'] else '-')} | err {e['fails']} | {st}"})
+                t.set_rows(rows)
 
     def on_key(self, win, key, *a):
+        """Back button = send to background (keeps the proxy running) instead of killing the app."""
         if key == 27:
             try:
                 from jnius import autoclass
                 autoclass("org.kivy.android.PythonActivity").mActivity.moveTaskToBack(True); return True
-            except Exception: return False
+            except Exception:
+                return False
         return False
 
     def close(self):
-        save_cfg(self.cfg)
+        self.cfg.update(port=self.port.text, lan=self.lan.active, frag=self.frag.active, doh=self.doh.active, fport=self.fport.text,
+                        flan=self.flan.active, ffrag=self.ffrag.active, fsni=self.fsni.text, sni1=self.sni1.text, n1=self.n1.text,
+                        n2=self.n2.text, ver=self.ver.active, sec=self.sec.active, unl=self.unl.active,
+                        ranges2=[l for l in self.rng.text.splitlines() if l.strip()],
+                        ip_pool=[[e["host"], e["lat"]] for e in self.ip_pool.snapshot()], qlan=self.qlan.active, qsec=self.qsec.active, qvpn=self.qvpn.active)
+        save_cfg(self.cfg); self.quick.cancel(); self.vpn.stop()
+        for x in (self.srv, self.fwd):
+            try: x and x.stop()
+            except Exception: pass
+        self.awake(False)
 
 
 class NetFreeApp(App):
     title = "NetFree"
+
     def build(self):
         global APP_DIR, CFG
         APP_DIR = self.user_data_dir; CFG = os.path.join(APP_DIR, "config.json")
-        setup_font(); Window.clearcolor = BG; Window.softinput_mode = "below_target"
-        self.ui = UI(); Window.bind(on_keyboard=self.ui.on_key); return self.ui
-    def on_pause(self): return True
+        fnt = setup_font(); Window.clearcolor = BG; Window.softinput_mode = "below_target"
+        self.ui = UI(); Window.bind(on_keyboard=self.ui.on_key); self.ui.log(f"فونت: {fnt or 'پیش‌فرض (بدون فارسی!)'}"); return self.ui
+
+    def on_pause(self): return True  # keep servers alive in background
+
     def on_stop(self): self.ui.close()
 
 
