@@ -1,15 +1,17 @@
 [app]
 p4a.branch = v2024.01.21
 android.ndk = 25b
-title = Aether
-package.name = aether
-package.domain = org.aether
+title = AMINIUM
+package.name = aminium
+package.domain = org.aminium
 source.dir = .
 source.include_exts = py,png,jpg,kv,json
 version = 1.0
-requirements = python3,kivy==2.3.0,pyjnius
+requirements = python3,kivy==2.3.0,pyjnius,openssl,certifi
 orientation = portrait
 fullscreen = 0
+icon.filename = %(source.dir)s/icon.png
+android.presplash_color = #05050f
 
 android.permissions = INTERNET,ACCESS_NETWORK_STATE,ACCESS_WIFI_STATE,WAKE_LOCK,FOREGROUND_SERVICE,POST_NOTIFICATIONS
 android.api = 33
