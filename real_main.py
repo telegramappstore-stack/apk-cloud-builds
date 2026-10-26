@@ -1,5 +1,5 @@
 """Aether WARP - Kivy / Android.  Home = one orb. Registry = account + share settings."""
-import json, math, os, select, socket, ssl, subprocess, threading, time
+import base64, datetime, json, math, urllib.request, uuid, os, select, socket, ssl, subprocess, threading, time
 from random import random
 
 from kivy.app import App
@@ -34,6 +34,50 @@ def read_addr(s, atyp):
     return l + recv_exact(s, l[0])
 
 
+def tls_ctx():
+    """Android has no system CA store for Python -> use certifi."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+def x25519(k, u=9):
+    p, a24 = 2 ** 255 - 19, 121665
+    k = bytearray(k); k[0] &= 248; k[31] &= 127; k[31] |= 64
+    k = int.from_bytes(k, "little"); x1 = u; x2, z2, x3, z3, sw = 1, 0, u, 1, 0
+    for t in range(254, -1, -1):
+        kt = (k >> t) & 1; sw ^= kt
+        if sw: x2, x3, z2, z3 = x3, x2, z3, z2
+        sw = kt
+        A, B = (x2 + z2) % p, (x2 - z2) % p; AA, BB = A * A % p, B * B % p; E = (AA - BB) % p
+        C, D = (x3 + z3) % p, (x3 - z3) % p; DA, CB = D * A % p, C * B % p
+        x3 = pow(DA + CB, 2, p); z3 = x1 * pow(DA - CB, 2, p) % p
+        x2 = AA * BB % p; z2 = E * (AA + a24 * E) % p
+    if sw: x2, x3, z2, z3 = x3, x2, z3, z2
+    return (x2 * pow(z2, p - 2, p) % p).to_bytes(32, "little")
+
+
+def register_warp():
+    """Ask Cloudflare for a new WARP account + WireGuard keys (pure python, no extra libs)."""
+    sk = os.urandom(32); pub = x25519(sk)
+    body = {"key": base64.b64encode(pub).decode(), "install_id": "", "fcm_token": "",
+            "tos": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "model": "PC", "serial_number": str(uuid.uuid4()), "locale": "en_US"}
+    req = urllib.request.Request("https://api.cloudflareclient.com/v0a2158/reg", json.dumps(body).encode(),
+                                 {"User-Agent": "okhttp/3.12.1", "CF-Client-Version": "a-6.3-1922",
+                                  "Content-Type": "application/json"})
+    acc = json.load(urllib.request.urlopen(req, timeout=20, context=tls_ctx()))
+    cfg = acc.get("config", {}); peer = (cfg.get("peers") or [{}])[0]
+    ad = cfg.get("interface", {}).get("addresses", {})
+    ep = peer.get("endpoint", {}).get("host", "engage.cloudflareclient.com:2408")
+    wg = (f"[Interface]\nPrivateKey = {base64.b64encode(sk).decode()}\n"
+          f"Address = {ad.get('v4', '')}/32, {ad.get('v6', '')}/128\nDNS = 1.1.1.1\nMTU = 1280\n\n"
+          f"[Peer]\nPublicKey = {peer.get('public_key', '')}\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = {ep}\n")
+    return {"id": acc.get("id", ""), "license": acc.get("account", {}).get("license", ""), "wg": wg}
+
+
 def socks5_trace(port, timeout=8):
     """GET cloudflare trace through local usque -> proves traffic goes via WARP."""
     s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
@@ -44,7 +88,7 @@ def socks5_trace(port, timeout=8):
         rep = recv_exact(s, 4)
         if rep[1] != 0: raise OSError("connect refused")
         read_addr(s, rep[3]); recv_exact(s, 2)
-        t = ssl.create_default_context().wrap_socket(s, server_hostname="one.one.one.one")
+        t = tls_ctx().wrap_socket(s, server_hostname="one.one.one.one")
         t.sendall(b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n")
         d = b""
         while True:
@@ -281,7 +325,7 @@ FloatLayout:
                     size_hint_y: None
                     height: dp(44)
                     Label:
-                        text: 'AETHER'
+                        text: 'AMINIUM'
                         bold: True
                         font_size: '22sp'
                         halign: 'left'
@@ -376,6 +420,9 @@ FloatLayout:
                                 text: 'Delete account'
                                 on_release: app.delete_account()
                             Txt:
+                                text: 'config.json = made by usque register: it asks Cloudflare for a device, creates your private key and stores key + token + endpoint in the app private folder.'
+                                font_size: '11sp'
+                            Txt:
                                 text: 'Or paste a config.json made on PC with usque.exe:'
                                 font_size: '12sp'
                             Field:
@@ -384,6 +431,20 @@ FloatLayout:
                             Btn:
                                 text: 'Save pasted config'
                                 on_release: app.paste_config()
+                        Card:
+                            Txt:
+                                text: 'GET WARP KEY'
+                                bold: True
+                            Txt:
+                                id: warp_out
+                                text: 'Creates a WireGuard WARP account (also works in the official WireGuard app).'
+                                font_size: '12sp'
+                            Btn:
+                                text: 'Get WARP key'
+                                on_release: app.get_warp()
+                            Btn:
+                                text: 'Copy WireGuard config'
+                                on_release: app.copy_wg()
                         Card:
                             Txt:
                                 text: 'CONNECTION'
@@ -447,7 +508,7 @@ FloatLayout:
 # ---------------------------------------------------------------- app
 class AetherApp(App):
     def build(self):
-        self.title = "Aether"
+        self.title = "AMINIUM"
         Window.clearcolor = (.02, .02, .06, 1)
         Window.bind(on_keyboard=self.on_key)
         self.meter, self.proc, self.srv, self.state, self.t0 = Meter(), None, None, "off", 0
@@ -482,11 +543,11 @@ class AetherApp(App):
             self.ids.log.text = "\n".join(self.logs)
         Clock.schedule_once(add)
 
-    def set_state(self, st):
+    def set_state(self, st, note=None):
         def do(dt):
             self.state = st
             self.ids.orb.state = st
-            self.ids.status.text = {"off": "TAP TO CONNECT", "wait": "CONNECTING...", "on": "CONNECTED"}[st]
+            self.ids.status.text = note or {"off": "TAP TO CONNECT", "wait": "CONNECTING...", "on": "CONNECTED"}[st]
             self.ids.status.color = COL[st] + (1,)
             if st == "on": self.t0, self.meter.up, self.meter.down = time.time(), 0, 0
             self.refresh_link()
@@ -517,7 +578,11 @@ class AetherApp(App):
     def refresh_link(self):
         ip, port, url = self.link()
         self.ids.link.text = url + ("" if self.cfg()["share"] else "\n(this phone only - enable sharing for other devices)")
-        self.ids.acc_state.text = "Account: READY" if os.path.exists(self.cfgp) else "Account: none - register first"
+        try:
+            c = json.load(open(self.cfgp))
+            self.ids.acc_state.text = f"Account READY\nendpoint {c.get('endpoint_v4', '?')}  id {str(c.get('id', ''))[:8]}..."
+        except (OSError, ValueError):
+            self.ids.acc_state.text = "No account yet - tap Register"
 
     def copy_link(self):
         Clipboard.copy(self.link()[2]); self.log("socks5 link copied.")
@@ -545,6 +610,20 @@ class AetherApp(App):
                 self.log(f"Cannot run usque: {e}")
             Clock.schedule_once(lambda dt: self.refresh_link())
         threading.Thread(target=work, daemon=True).start()
+
+    def get_warp(self):
+        def work():
+            self.log("Requesting WARP key from Cloudflare...")
+            try:
+                r = register_warp(); self.wg = r["wg"]
+                txt = f"OK  id {r['id'][:8]}...  license {r['license'] or '-'}\nWireGuard config ready - tap Copy."
+                Clock.schedule_once(lambda dt: setattr(self.ids.warp_out, "text", txt))
+            except Exception as e:
+                self.log(f"Get WARP failed: {type(e).__name__}: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def copy_wg(self):
+        Clipboard.copy(getattr(self, "wg", "")); self.log("WireGuard config copied.")
 
     def paste_config(self):
         try:
@@ -580,7 +659,7 @@ class AetherApp(App):
             p = self.proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                              text=True, errors="replace")
         except OSError as e:
-            self.log(f"Cannot run usque: {e}"); return self.set_state("off")
+            self.log(f"Cannot run usque: {e}"); return self.set_state("off", "usque not found - see Registry log")
         threading.Thread(target=self.reader, args=(p,), daemon=True).start()
         ok = False
         for _ in range(25):
@@ -591,7 +670,7 @@ class AetherApp(App):
             time.sleep(1.5)
         if not ok:
             self.log("Could not reach WARP. Try the HTTP/2 switch or re-register.")
-            return Clock.schedule_once(lambda dt: self.disconnect())
+            return Clock.schedule_once(lambda dt: self.disconnect("FAILED - open Registry > LOG"))
         try:
             self.srv = Socks5Server(bind, c["port"], self.meter, c["user"], c["pw"])
         except OSError as e:
@@ -604,11 +683,11 @@ class AetherApp(App):
         if p is self.proc and self.state != "off":
             Clock.schedule_once(lambda dt: self.disconnect())
 
-    def disconnect(self):
+    def disconnect(self, note=None):
         if self.srv: self.srv.stop(); self.srv = None
         p, self.proc = self.proc, None
         if p and p.poll() is None: p.terminate()
-        self.set_state("off")
+        self.set_state("off", note)
 
     def stats(self, dt):
         up, down = self.meter.up, self.meter.down
