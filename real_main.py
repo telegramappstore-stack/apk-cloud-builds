@@ -1,5 +1,6 @@
 """Aether WARP - Kivy / Android.  Home = one orb. Registry = account + share settings."""
-import base64, datetime, json, math, urllib.request, uuid, os, select, socket, ssl, subprocess, threading, time
+import base64, datetime, json, shlex, math, urllib.request, uuid, os, select, socket, ssl, subprocess, threading, time
+from concurrent.futures import ThreadPoolExecutor
 from random import random
 
 from kivy.app import App
@@ -78,6 +79,17 @@ def register_warp():
     return {"id": acc.get("id", ""), "license": acc.get("account", {}).get("license", ""), "wg": wg}
 
 
+def socks_ok(port, timeout=8):
+    """Plain SOCKS5 CONNECT to 1.1.1.1:443 (no TLS, no DNS) -> proves the tunnel carries traffic."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    try:
+        s.sendall(b"\x05\x01\x00"); recv_exact(s, 2)
+        s.sendall(b"\x05\x01\x00\x01" + bytes([1, 1, 1, 1]) + (443).to_bytes(2, "big"))
+        return recv_exact(s, 4)[1] == 0
+    finally:
+        s.close()
+
+
 def socks5_trace(port, timeout=8):
     """GET cloudflare trace through local usque -> proves traffic goes via WARP."""
     s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
@@ -99,6 +111,41 @@ def socks5_trace(port, timeout=8):
         return dict(l.split("=", 1) for l in body.splitlines() if "=" in l)
     finally:
         s.close()
+
+
+def tlv(b, i):
+    l = b[i + 1]; j = i + 2
+    if l & 0x80:
+        n = l & 0x7f; l = int.from_bytes(b[j:j + n], "big"); j += n
+    return b[i], j, j + l
+
+
+def spki_of(cert):
+    """Pull SubjectPublicKeyInfo (DER) out of an X.509 cert without extra libs."""
+    _, i, _ = tlv(cert, 0); _, pos, _ = tlv(cert, i)
+    t, s_, e = tlv(cert, pos)
+    if t == 0xA0: pos = e
+    for _ in range(5): pos = tlv(cert, pos)[2]
+    return cert[pos:tlv(cert, pos)[2]]
+
+
+def pin_of(path):
+    pem = json.load(open(path))["endpoint_pub_key"]
+    return base64.b64decode("".join(l for l in pem.splitlines() if "-----" not in l))
+
+
+def check_endpoint(ip, port, pin, sni, timeout=4.0):
+    """TLS handshake -> (ms or None, key matches the one usque pins)."""
+    t0 = time.perf_counter()
+    try:
+        ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+        ctx.set_alpn_protocols(["h2"])
+        with socket.create_connection((ip, port), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=sni) as t:
+                der = t.getpeercert(binary_form=True)
+        return (time.perf_counter() - t0) * 1000, spki_of(der) == pin
+    except Exception:
+        return None, False
 
 
 def port_free(bind, port):
@@ -483,6 +530,41 @@ FloatLayout:
                                 on_release: app.save()
                         Card:
                             Txt:
+                                text: 'CONFIG & PING'
+                                bold: True
+                            Field:
+                                id: in_sni
+                                hint_text: 'SNI (e.g. zt-masque.cloudflareclient.com)'
+                            Field:
+                                id: in_extra
+                                hint_text: 'extra usque args (optional)'
+                            BoxLayout:
+                                size_hint_y: None
+                                height: dp(40)
+                                Txt:
+                                    text: 'L4 mode (l4-socks)'
+                                Switch:
+                                    id: sw_l4
+                                    size_hint_x: None
+                                    width: dp(80)
+                            Field:
+                                id: in_prefix
+                                hint_text: 'scan prefixes: 162.159.198, 162.159.192'
+                            Btn:
+                                text: 'Ping current endpoint'
+                                on_release: app.ping_ep()
+                            Btn:
+                                text: 'Scan endpoints'
+                                on_release: app.scan_ep()
+                            Btn:
+                                text: 'Use best IP in config'
+                                on_release: app.apply_ep()
+                            Txt:
+                                id: scan_out
+                                text: 'Ping = TLS over TCP 443 (UDP/QUIC cannot be pinged).'
+                                font_size: '12sp'
+                        Card:
+                            Txt:
                                 text: 'SHARE TO V2RAY'
                                 bold: True
                             Txt:
@@ -556,7 +638,9 @@ class AetherApp(App):
     def cfg(self):
         return {"h2": self.ids.sw_h2.active, "share": self.ids.sw_share.active,
                 "port": self.ids.in_port.text or "10820",
-                "user": self.ids.in_user.text.strip(), "pw": self.ids.in_pw.text}
+                "user": self.ids.in_user.text.strip(), "pw": self.ids.in_pw.text,
+                "sni": self.ids.in_sni.text.strip(), "extra": self.ids.in_extra.text.strip(),
+                "l4": self.ids.sw_l4.active, "prefix": self.ids.in_prefix.text.strip()}
 
     def load(self):
         try: d = json.load(open(self.setp))
@@ -565,6 +649,8 @@ class AetherApp(App):
         self.ids.sw_share.active = d.get("share", False)
         self.ids.in_port.text = str(d.get("port", "10820"))
         self.ids.in_user.text, self.ids.in_pw.text = d.get("user", ""), d.get("pw", "")
+        self.ids.in_sni.text, self.ids.in_extra.text = d.get("sni", ""), d.get("extra", "")
+        self.ids.sw_l4.active, self.ids.in_prefix.text = d.get("l4", False), d.get("prefix", "162.159.198")
         self.refresh_link()
 
     def save(self):
@@ -611,6 +697,49 @@ class AetherApp(App):
             Clock.schedule_once(lambda dt: self.refresh_link())
         threading.Thread(target=work, daemon=True).start()
 
+    def out(self, msg):
+        self.log(msg.splitlines()[0])
+        Clock.schedule_once(lambda dt: setattr(self.ids.scan_out, "text", msg))
+
+    def sni(self):
+        return self.ids.in_sni.text.strip() or "consumer-masque.cloudflareclient.com"
+
+    def ping_ep(self):
+        def work():
+            try:
+                d = json.load(open(self.cfgp)); pin = pin_of(self.cfgp)
+                ip = str(d.get("endpoint_h2_v4") or d.get("endpoint_v4", "")).split(":")[0]
+            except Exception as e:
+                return self.out(f"Need a valid config first ({type(e).__name__})")
+            r = [x for x in (check_endpoint(ip, 443, pin, self.sni()) for _ in range(3)) if x[0]]
+            self.out(f"{ip}: " + (f"{min(x[0] for x in r):.0f} ms, key {'OK' if r[0][1] else 'MISMATCH'}"
+                                  if r else "no answer - this IP is probably blocked"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def scan_ep(self):
+        def work():
+            try: pin = pin_of(self.cfgp)
+            except Exception as e: return self.out(f"Need a valid config first ({type(e).__name__})")
+            pre = [p.strip() for p in (self.ids.in_prefix.text or "162.159.198").split(",") if p.strip()]
+            self.out("Scanning... (20-60 s)")
+            ips = [f"{p}.{i}" for p in pre for i in range(1, 255)]
+            with ThreadPoolExecutor(48) as ex:
+                res = list(ex.map(lambda ip: (ip,) + check_endpoint(ip, 443, pin, self.sni(), 2.5), ips))
+            res = sorted([r for r in res if r[1]], key=lambda r: (not r[2], r[1]))
+            good = [r for r in res if r[2]]; self.best = good[0][0] if good else None
+            lines = [f"{ip}  {ms:.0f} ms  {'OK' if ok else 'key mismatch'}" for ip, ms, ok in res[:8]]
+            self.out(f"{len(res)} answered, {len(good)} genuine.\n" + "\n".join(lines)
+                     + (f"\nBest: {self.best} - tap 'Use best IP'" if self.best else ""))
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply_ep(self):
+        ip = getattr(self, "best", None)
+        if not ip: return self.out("Run Scan first.")
+        d = json.load(open(self.cfgp)); json.dump(d, open(self.cfgp + ".bak", "w"))
+        d["endpoint_v4"] = d["endpoint_h2_v4"] = ip; json.dump(d, open(self.cfgp, "w"), indent=2)
+        self.out(f"Endpoint set to {ip} (backup saved). Reconnect.")
+        Clock.schedule_once(lambda dt: self.refresh_link())
+
     def get_warp(self):
         def work():
             self.log("Requesting WARP key from Cloudflare...")
@@ -649,12 +778,17 @@ class AetherApp(App):
         bind = "0.0.0.0" if c["share"] else "127.0.0.1"
         if not port_free(bind, c["port"]) or not port_free("127.0.0.1", INTERNAL):
             return self.log(f"Port {c['port']} or {INTERNAL} is busy. Change the port.")
+        self.masque_ok = False
         self.set_state("wait")
         threading.Thread(target=self.run_core, args=(c, bind), daemon=True).start()
 
     def run_core(self, c, bind):
-        args = [self.exe(), "-c", self.cfgp, "socks", "-b", "127.0.0.1", "-p", str(INTERNAL)]
-        if c["h2"]: args.append("--http2")
+        l4 = c["l4"]
+        args = [self.exe(), "-c", self.cfgp, "l4-socks" if l4 else "socks", "-b", "127.0.0.1", "-p", str(INTERNAL)]
+        if c["h2"] and not l4: args.append("--http2")
+        if c["sni"] and not l4: args += ["-s", c["sni"]]
+        if c["extra"]: args += shlex.split(c["extra"])
+        self.log("run: " + " ".join(args[1:]))
         try:
             p = self.proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                              text=True, errors="replace")
@@ -664,8 +798,14 @@ class AetherApp(App):
         ok = False
         for _ in range(25):
             if p.poll() is not None: break
-            try: ok = socks5_trace(INTERNAL, 6).get("warp") in ("on", "plus")
-            except Exception: ok = False
+            try:
+                ok = socks5_trace(INTERNAL, 6).get("warp") in ("on", "plus")
+            except Exception as e:
+                ok = False
+                if self.masque_ok:  # usque says MASQUE is up: accept a plain tunnel test
+                    try: ok = socks_ok(INTERNAL)
+                    except Exception as e2: e = e2
+                if not ok: self.log(f"test: {type(e).__name__}: {e}")
             if ok or self.state == "off": break
             time.sleep(1.5)
         if not ok:
@@ -679,7 +819,9 @@ class AetherApp(App):
         self.set_state("on")
 
     def reader(self, p):
-        for l in p.stdout: self.log("usque: " + l.rstrip())
+        for l in p.stdout:
+            if "connected to masque" in l.lower(): self.masque_ok = True
+            self.log("usque: " + l.rstrip())
         if p is self.proc and self.state != "off":
             Clock.schedule_once(lambda dt: self.disconnect())
 
