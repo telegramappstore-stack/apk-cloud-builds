@@ -10,6 +10,7 @@ from kivy.core.window import Window
 from kivy.graphics import Color, Ellipse, Line, Rectangle
 from kivy.lang import Builder
 from kivy.metrics import dp
+from kivy.utils import platform
 from kivy.properties import StringProperty
 from kivy.uix.widget import Widget
 
@@ -164,6 +165,19 @@ def lan_ip():
         return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
+
+
+VPN_CLS = "org.aminium.vpn.AminiumVpnService"
+
+
+def jact():
+    from jnius import autoclass
+    return autoclass("org.kivy.android.PythonActivity").mActivity
+
+
+def vpn_intent():
+    from jnius import autoclass
+    return autoclass("android.content.Intent")(jact(), autoclass("java.lang.Class").forName(VPN_CLS))
 
 
 def fmt(n):
@@ -815,8 +829,42 @@ class AetherApp(App):
             self.srv = Socks5Server(bind, c["port"], self.meter, c["user"], c["pw"])
         except OSError as e:
             self.log(f"Cannot open port: {e}"); return Clock.schedule_once(lambda dt: self.disconnect())
-        self.log("Connected via WARP.")
-        self.set_state("on")
+        self.log("Tunnel to WARP is up.")
+        Clock.schedule_once(lambda dt: self.after_core(c))
+
+    # ---- real Android VPN (key icon)
+    def after_core(self, c):
+        if platform != "android":
+            return self.set_state("on")
+        try:
+            from android import activity
+            from jnius import autoclass
+            self.vpn_args = c
+            it = autoclass("android.net.VpnService").prepare(jact())
+            if it is None: return self.vpn_go()
+            activity.bind(on_activity_result=self.vpn_result)
+            jact().startActivityForResult(it, 7001)
+        except Exception as e:
+            self.log(f"VPN error: {type(e).__name__}: {e}"); self.disconnect("VPN FAILED - see LOG")
+
+    def vpn_result(self, req, res, data):
+        if req != 7001: return
+        if res == -1: self.vpn_go()
+        else: self.disconnect("VPN permission denied")
+
+    def vpn_go(self):
+        try:
+            c = self.vpn_args; it = vpn_intent()
+            it.putExtra("port", int(c["port"])); it.putExtra("user", c["user"]); it.putExtra("pw", c["pw"])
+            jact().startService(it)
+            self.log("VPN service started."); self.set_state("on")
+        except Exception as e:
+            self.log(f"VPN error: {type(e).__name__}: {e}"); self.disconnect("VPN FAILED - see LOG")
+
+    def vpn_stop(self):
+        if platform == "android":
+            try: jact().stopService(vpn_intent())
+            except Exception: pass
 
     def reader(self, p):
         for l in p.stdout:
@@ -826,6 +874,7 @@ class AetherApp(App):
             Clock.schedule_once(lambda dt: self.disconnect())
 
     def disconnect(self, note=None):
+        self.vpn_stop()
         if self.srv: self.srv.stop(); self.srv = None
         p, self.proc = self.proc, None
         if p and p.poll() is None: p.terminate()
@@ -833,6 +882,12 @@ class AetherApp(App):
 
     def stats(self, dt):
         up, down = self.meter.up, self.meter.down
+        if self.state == "on" and platform == "android" and time.time() - self.t0 > 4:
+            try:
+                from jnius import autoclass
+                if not autoclass(VPN_CLS).running: self.disconnect("VPN stopped - see LOG")
+            except Exception:
+                pass
         if self.state == "on":
             self.ids.dl_speed.text = fmt(down - self.last[1]) + "/s"
             self.ids.ul_speed.text = fmt(up - self.last[0]) + "/s"
