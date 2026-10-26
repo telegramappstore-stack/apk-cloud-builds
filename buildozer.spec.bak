@@ -1,22 +1,24 @@
 [app]
-title = ProxyScout
-package.name = proxyscout
-package.domain = org.proxyscout
+title = AMINIUM
+package.name = aminium
+package.domain = org.aminium
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
-version = 1.1
-requirements = python3,kivy==2.3.0,certifi
+source.include_exts = py,png,jpg,kv,json
+version = 1.0
+requirements = python3,kivy==2.3.0,pyjnius,openssl,certifi
 orientation = portrait
 fullscreen = 0
-android.permissions = INTERNET,FOREGROUND_SERVICE
-android.api = 33
+icon.filename = %(source.dir)s/icon.png
+android.presplash_color = #05050f
+
+android.permissions = INTERNET,ACCESS_NETWORK_STATE,ACCESS_WIFI_STATE,WAKE_LOCK,FOREGROUND_SERVICE,POST_NOTIFICATIONS
+android.api = 34
 android.minapi = 24
-android.ndk = 25b
 android.archs = arm64-v8a
 android.accept_sdk_license = True
-android.add_src = java
+
+# the usque binary, renamed to libusque.so (see steps)
 android.add_libs_arm64_v8a = libs/arm64-v8a/*.so
-p4a.branch = v2024.01.21
 
 [buildozer]
 log_level = 2
