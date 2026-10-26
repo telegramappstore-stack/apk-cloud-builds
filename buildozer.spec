@@ -1,5 +1,5 @@
 [app]
-p4a.branch = v2024.01.21
+p4a.branch = master
 android.ndk = 25b
 title = AMINIUM
 package.name = aminium
