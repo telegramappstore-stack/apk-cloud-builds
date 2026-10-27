@@ -1,6 +1,8 @@
-<service android:name="org.aminium.vpn.AminiumVpnService"
-         android:permission="android.permission.BIND_VPN_SERVICE"
-         android:exported="false">
+<service
+    android:name="org.aether.warptool.VpnTunnelService"
+    android:permission="android.permission.BIND_VPN_SERVICE"
+    android:foregroundServiceType="specialUse"
+    android:exported="false">
     <intent-filter>
         <action android:name="android.net.VpnService" />
     </intent-filter>
