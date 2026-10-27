@@ -1,906 +1,640 @@
-"""Aether WARP - Kivy / Android.  Home = one orb. Registry = account + share settings."""
-import base64, datetime, json, shlex, math, urllib.request, uuid, os, select, socket, ssl, subprocess, threading, time
-from concurrent.futures import ThreadPoolExecutor
-from random import random
 
+"""NetFree - Kivy UI (Android). The proxy engine lives in engine.py and runs inside the background service (service.py),
+so the connection (and the VPN) stay up after this window is closed."""
+import ipaddress, json, os, queue, re, subprocess, sys, threading, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from engine import CF, SNIS, fetch_proxies, lan_ip, load_cfg, merge_nets, probe_ip, proxy_probe, rpc, sample_ips, save_cfg
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.clipboard import Clipboard
+from kivy.core.text import Label as CoreLabel, LabelBase
 from kivy.core.window import Window
-from kivy.graphics import Color, Ellipse, Line, Rectangle
-from kivy.lang import Builder
-from kivy.metrics import dp
+from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.metrics import dp, sp
+from kivy.properties import BooleanProperty, ListProperty, NumericProperty, ObjectProperty
+from kivy.uix.anchorlayout import AnchorLayout
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.progressbar import ProgressBar
+from kivy.uix.recycleboxlayout import RecycleBoxLayout
+from kivy.uix.recycleview import RecycleView
+from kivy.uix.screenmanager import NoTransition, Screen, ScreenManager
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.spinner import Spinner
+from kivy.uix.switch import Switch
+from kivy.uix.textinput import TextInput
 from kivy.utils import platform
-from kivy.properties import StringProperty
-from kivy.uix.widget import Widget
 
-INTERNAL = 10899  # usque listens here (127.0.0.1 only); our relay exposes the public port
-COL = {"off": (.55, .5, 1), "wait": (1, .75, .2), "on": (0, .96, .83)}
+BG, CARD, TXT, MUT = (.05, .07, .13, 1), (.09, .125, .2, 1), (.9, .91, .92, 1), (.58, .64, .72, 1)
+ACC, GRN, RED, GRY, AMB = (.145, .388, .922, 1), (.063, .725, .506, 1), (.937, .267, .267, 1), (.392, .455, .545, 1), (.96, .62, .04, 1)
+NAV = [("quick", "سریع"), ("dash", "داشبورد"), ("scan", "اسکن IP"), ("online", "پروکسی"), ("pool", "استخر"), ("log", "لاگ")]
 
+# ---- Persian text: Kivy has no RTL shaping on Android -> reshape + bidi each line ourselves
+_AR = re.compile(r"[\u0600-\u06FF]")
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
 
-# ---------------------------------------------------------------- network helpers
-def recv_exact(s, n):
-    b = b""
-    while len(b) < n:
-        c = s.recv(n - len(b))
-        if not c:
-            raise OSError("closed")
-        b += c
-    return b
-
-
-def read_addr(s, atyp):
-    if atyp == 1: return recv_exact(s, 4)
-    if atyp == 4: return recv_exact(s, 16)
-    l = recv_exact(s, 1)
-    return l + recv_exact(s, l[0])
+    def fa(s):
+        return "\n".join(get_display(arabic_reshaper.reshape(l)) if _AR.search(l) else l for l in str(s).split("\n"))
+except Exception:
+    def fa(s): return str(s)
 
 
-def tls_ctx():
-    """Android has no system CA store for Python -> use certifi."""
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+FONT = "Roboto"
 
 
-def x25519(k, u=9):
-    p, a24 = 2 ** 255 - 19, 121665
-    k = bytearray(k); k[0] &= 248; k[31] &= 127; k[31] |= 64
-    k = int.from_bytes(k, "little"); x1 = u; x2, z2, x3, z3, sw = 1, 0, u, 1, 0
-    for t in range(254, -1, -1):
-        kt = (k >> t) & 1; sw ^= kt
-        if sw: x2, x3, z2, z3 = x3, x2, z3, z2
-        sw = kt
-        A, B = (x2 + z2) % p, (x2 - z2) % p; AA, BB = A * A % p, B * B % p; E = (AA - BB) % p
-        C, D = (x3 + z3) % p, (x3 - z3) % p; DA, CB = D * A % p, C * B % p
-        x3 = pow(DA + CB, 2, p); z3 = x1 * pow(DA - CB, 2, p) % p
-        x2 = AA * BB % p; z2 = E * (AA + a24 * E) % p
-    if sw: x2, x3, z2, z3 = x3, x2, z3, z2
-    return (x2 * pow(z2, p - 2, p) % p).to_bytes(32, "little")
-
-
-def register_warp():
-    """Ask Cloudflare for a new WARP account + WireGuard keys (pure python, no extra libs)."""
-    sk = os.urandom(32); pub = x25519(sk)
-    body = {"key": base64.b64encode(pub).decode(), "install_id": "", "fcm_token": "",
-            "tos": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "model": "PC", "serial_number": str(uuid.uuid4()), "locale": "en_US"}
-    req = urllib.request.Request("https://api.cloudflareclient.com/v0a2158/reg", json.dumps(body).encode(),
-                                 {"User-Agent": "okhttp/3.12.1", "CF-Client-Version": "a-6.3-1922",
-                                  "Content-Type": "application/json"})
-    acc = json.load(urllib.request.urlopen(req, timeout=20, context=tls_ctx()))
-    cfg = acc.get("config", {}); peer = (cfg.get("peers") or [{}])[0]
-    ad = cfg.get("interface", {}).get("addresses", {})
-    ep = peer.get("endpoint", {}).get("host", "engage.cloudflareclient.com:2408")
-    wg = (f"[Interface]\nPrivateKey = {base64.b64encode(sk).decode()}\n"
-          f"Address = {ad.get('v4', '')}/32, {ad.get('v6', '')}/128\nDNS = 1.1.1.1\nMTU = 1280\n\n"
-          f"[Peer]\nPublicKey = {peer.get('public_key', '')}\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = {ep}\n")
-    return {"id": acc.get("id", ""), "license": acc.get("account", {}).get("license", ""), "wg": wg}
-
-
-def socks_ok(port, timeout=8):
-    """Plain SOCKS5 CONNECT to 1.1.1.1:443 (no TLS, no DNS) -> proves the tunnel carries traffic."""
-    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-    try:
-        s.sendall(b"\x05\x01\x00"); recv_exact(s, 2)
-        s.sendall(b"\x05\x01\x00\x01" + bytes([1, 1, 1, 1]) + (443).to_bytes(2, "big"))
-        return recv_exact(s, 4)[1] == 0
-    finally:
-        s.close()
-
-
-def socks5_trace(port, timeout=8):
-    """GET cloudflare trace through local usque -> proves traffic goes via WARP."""
-    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-    try:
-        s.sendall(b"\x05\x01\x00"); recv_exact(s, 2)
-        h = b"one.one.one.one"
-        s.sendall(b"\x05\x01\x00\x03" + bytes([len(h)]) + h + (443).to_bytes(2, "big"))
-        rep = recv_exact(s, 4)
-        if rep[1] != 0: raise OSError("connect refused")
-        read_addr(s, rep[3]); recv_exact(s, 2)
-        t = tls_ctx().wrap_socket(s, server_hostname="one.one.one.one")
-        t.sendall(b"GET /cdn-cgi/trace HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n")
-        d = b""
-        while True:
-            c = t.recv(4096)
-            if not c: break
-            d += c
-        body = d.split(b"\r\n\r\n", 1)[-1].decode(errors="replace")
-        return dict(l.split("=", 1) for l in body.splitlines() if "=" in l)
-    finally:
-        s.close()
-
-
-def tlv(b, i):
-    l = b[i + 1]; j = i + 2
-    if l & 0x80:
-        n = l & 0x7f; l = int.from_bytes(b[j:j + n], "big"); j += n
-    return b[i], j, j + l
-
-
-def spki_of(cert):
-    """Pull SubjectPublicKeyInfo (DER) out of an X.509 cert without extra libs."""
-    _, i, _ = tlv(cert, 0); _, pos, _ = tlv(cert, i)
-    t, s_, e = tlv(cert, pos)
-    if t == 0xA0: pos = e
-    for _ in range(5): pos = tlv(cert, pos)[2]
-    return cert[pos:tlv(cert, pos)[2]]
-
-
-def pin_of(path):
-    pem = json.load(open(path))["endpoint_pub_key"]
-    return base64.b64decode("".join(l for l in pem.splitlines() if "-----" not in l))
-
-
-def check_endpoint(ip, port, pin, sni, timeout=4.0):
-    """TLS handshake -> (ms or None, key matches the one usque pins)."""
-    t0 = time.perf_counter()
-    try:
-        ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-        ctx.set_alpn_protocols(["h2"])
-        with socket.create_connection((ip, port), timeout=timeout) as raw:
-            with ctx.wrap_socket(raw, server_hostname=sni) as t:
-                der = t.getpeercert(binary_form=True)
-        return (time.perf_counter() - t0) * 1000, spki_of(der) == pin
-    except Exception:
-        return None, False
-
-
-def port_free(bind, port):
-    s = socket.socket()
-    try:
-        s.bind((bind, int(port))); return True
-    except OSError:
-        return False
-    finally:
-        s.close()
-
-
-def lan_ip():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-
-
-VPN_CLS = "org.aminium.vpn.AminiumVpnService"
-
-
-def jact():
-    from jnius import autoclass
-    return autoclass("org.kivy.android.PythonActivity").mActivity
-
-
-def vpn_intent():
-    from jnius import autoclass
-    return autoclass("android.content.Intent")(jact(), autoclass("java.lang.Class").forName(VPN_CLS))
+def setup_font():
+    """Use a font that has Persian glyphs: fonts/Vazirmatn-Regular.ttf if you ship it, else Android's system Arabic font."""
+    global FONT
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(here, "fonts", "Vazirmatn-Regular.ttf"), os.path.join(here, "fonts", "font.ttf"), "/system/fonts/NotoNaskhArabic-Regular.ttf",
+              "/system/fonts/NotoSansArabic-Regular.ttf", "/system/fonts/DroidNaskh-Regular.ttf",
+              "C:/Windows/Fonts/tahoma.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+        if os.path.exists(p):
+            LabelBase.register(name="Roboto", fn_regular=p); FONT = p; return
 
 
 def fmt(n):
     for u in ("B", "KB", "MB", "GB"):
-        if n < 1024 or u == "GB":
-            return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
+        if n < 1024 or u == "GB": return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
         n /= 1024
 
 
-class Meter:
-    up = down = 0
+# ---- widgets
+class RBtn(Button):
+    bg = ListProperty(ACC)
+    circle = BooleanProperty(False)
+
+    def __init__(s, **k):
+        k.setdefault("background_normal", ""); k.setdefault("background_down", ""); k["background_color"] = (0, 0, 0, 0)
+        k.setdefault("font_name", FONT)
+        super().__init__(**k)
+        with s.canvas.before:
+            s._c = Color(*s.bg); s._r = RoundedRectangle(pos=s.pos, size=s.size, radius=[dp(12)])
+        s.bind(pos=s._u, size=s._u, bg=s._u, state=s._u, circle=s._u); s._u()
+
+    def _u(s, *a):
+        k, b = (.75 if s.state == "down" else 1), s.bg
+        s._c.rgba = (b[0] * k, b[1] * k, b[2] * k, b[3] if len(b) > 3 else 1)
+        s._r.pos, s._r.size = s.pos, s.size
+        s._r.radius = [min(s.width, s.height) / 2 if s.circle else dp(12)]
 
 
-class Socks5Server:
-    """Public SOCKS5 (optional user/pass) -> usque. Counts bytes. TCP CONNECT only."""
-
-    def __init__(self, bind, port, meter, user="", pw=""):
-        self.m, self.user, self.pw, self.run = meter, user, pw, True
-        self.sock = socket.socket()
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((bind, int(port))); self.sock.listen(128)
-        threading.Thread(target=self.loop, daemon=True).start()
-
-    def stop(self):
-        self.run = False
-        try: self.sock.close()
-        except OSError: pass
-
-    def loop(self):
-        while self.run:
-            try: c, _ = self.sock.accept()
-            except OSError: break
-            threading.Thread(target=self.handle, args=(c,), daemon=True).start()
-
-    def handle(self, c):
-        up = None
-        try:
-            c.settimeout(20)
-            recv_exact(c, 1); methods = recv_exact(c, recv_exact(c, 1)[0])
-            if self.user:
-                if 2 not in methods: c.sendall(b"\x05\xff"); return
-                c.sendall(b"\x05\x02"); recv_exact(c, 1)
-                u = recv_exact(c, recv_exact(c, 1)[0]).decode(errors="replace")
-                p = recv_exact(c, recv_exact(c, 1)[0]).decode(errors="replace")
-                if (u, p) != (self.user, self.pw): c.sendall(b"\x01\x01"); return
-                c.sendall(b"\x01\x00")
-            else:
-                if 0 not in methods: c.sendall(b"\x05\xff"); return
-                c.sendall(b"\x05\x00")
-            head = recv_exact(c, 4)
-            addr = read_addr(c, head[3]); port = recv_exact(c, 2)
-            if head[1] != 1: c.sendall(b"\x05\x07\x00\x01" + b"\0" * 6); return
-            up = socket.create_connection(("127.0.0.1", INTERNAL), timeout=15)
-            up.sendall(b"\x05\x01\x00")
-            if recv_exact(up, 2) != b"\x05\x00": raise OSError("upstream")
-            up.sendall(b"\x05\x01\x00" + bytes([head[3]]) + addr + port)
-            rep = recv_exact(up, 4); rest = read_addr(up, rep[3]) + recv_exact(up, 2)
-            c.sendall(rep + rest)
-            if rep[1] != 0: return
-            c.settimeout(None); up.settimeout(None)
-            while True:
-                r, _, _ = select.select([c, up], [], [], 120)
-                if not r: break
-                for s in r:
-                    d = s.recv(65536)
-                    if not d: return
-                    if s is c: self.m.up += len(d); up.sendall(d)
-                    else: self.m.down += len(d); c.sendall(d)
-        except OSError:
-            pass
-        finally:
-            for s in (c, up):
-                try: s and s.close()
-                except OSError: pass
+def B(text, cb, color=ACC, h=44, size=13):
+    return RBtn(text=fa(text), on_release=lambda *_: cb(), bg=color, font_size=sp(size), size_hint_y=None, height=dp(h))
 
 
-# ---------------------------------------------------------------- UI widgets
-class Space(Widget):
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        self.stars = []
-        with self.canvas:
-            Color(.03, .02, .10, 1); self.bg = Rectangle()
-            Color(.30, .10, .55, .30); self.n1 = Ellipse()
-            Color(0, .35, .55, .22); self.n2 = Ellipse()
-            for _ in range(90):
-                c = Color(1, 1, 1, 1); e = Ellipse()
-                self.stars.append((c, e, random(), random(), random() * 2 + 1, random() * 6.28))
-        self.bind(size=self.lay, pos=self.lay)
-        Clock.schedule_interval(self.twinkle, 1 / 15)
+class WL(Label):
+    """Wrapping label. Persian paragraphs are word-wrapped in logical order BEFORE reshaping, so lines read correctly."""
+    def __init__(s, text="", size=13, color=TXT, bold=False, center=False, smart=True, **k):
+        k.setdefault("font_name", FONT)
+        super().__init__(font_size=sp(size), color=color, bold=bold, size_hint_y=None,
+                         halign="center" if center else "right", valign="middle", **k)
+        s.smart, s.raw, s._ready = smart, "", False
+        s.bind(width=s._on_w, texture_size=s._on_h); s.set(text)
 
-    def lay(self, *a):
-        w, h = self.size
-        self.bg.pos, self.bg.size = self.pos, self.size
-        self.n1.pos, self.n1.size = (-w * .3, h * .55), (w * 1.1, h * .6)
-        self.n2.pos, self.n2.size = (w * .2, -h * .15), (w * 1.1, h * .5)
-        for c, e, x, y, r, p in self.stars:
-            e.pos, e.size = (x * w, y * h), (dp(r), dp(r))
+    def _on_w(s, *a): s._ready = True; s.text_size = (s.width, None); s._layout()
+    def _on_h(s, *a): s.height = max(dp(22), s.texture_size[1] + dp(6))
+    def set(s, t): s.raw = str(t); s._layout()
 
-    def twinkle(self, dt):
-        t = time.time()
-        for c, e, x, y, r, p in self.stars:
-            c.a = .3 + .7 * abs(math.sin(t * .8 + p))
+    def _layout(s):
+        if not (s.smart and s._ready and _AR.search(s.raw)):
+            s.text = fa(s.raw); return
+        cl, mw, out = CoreLabel(font_name=s.font_name, font_size=s.font_size), s.width - dp(4), []
+        for para in s.raw.split("\n"):
+            cur = ""
+            for w in para.split(" "):
+                t = (cur + " " + w) if cur else w
+                if cur and cl.get_extents(fa(t))[0] > mw: out.append(cur); cur = w
+                else: cur = t
+            out.append(cur)
+        s.text = "\n".join(fa(l) for l in out)
 
 
-class Orb(Widget):
-    state = StringProperty("off")
+class Card(BoxLayout):
+    def __init__(s, **k):
+        k.setdefault("orientation", "vertical"); k.setdefault("padding", dp(12)); k.setdefault("spacing", dp(8)); k.setdefault("size_hint_y", None)
+        super().__init__(**k)
+        s.bind(minimum_height=s.setter("height"))
+        with s.canvas.before:
+            Color(*CARD); s._r = RoundedRectangle(pos=s.pos, size=s.size, radius=[dp(14)])
+        s.bind(pos=s._u, size=s._u)
 
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        self.t = 0
-        Clock.schedule_interval(self.tick, 1 / 30)
-
-    def tick(self, dt):
-        self.t += dt; self.draw()
-
-    def draw(self):
-        self.canvas.clear()
-        cx, cy = self.center; R = min(self.width, self.height) * .30
-        c, t = COL[self.state], self.t
-        pulse = .5 + .5 * math.sin(t * 2) if self.state == "on" else 0
-        with self.canvas:
-            for i in range(7):
-                Color(*c, .05 * (7 - i) / 7 * (1 + pulse))
-                rr = R * (1.9 - i * .1); Ellipse(pos=(cx - rr, cy - rr), size=(2 * rr, 2 * rr))
-            if self.state == "on":
-                for i in range(3):
-                    k = (t * .4 + i / 3) % 1
-                    Color(*c, (1 - k) * .5); Line(circle=(cx, cy, R * (1.05 + k * .8)), width=dp(1.5))
-            Color(*c, .9); Line(circle=(cx, cy, R * 1.12), width=dp(2))
-            if self.state == "wait":
-                a = (t * 240) % 360
-                Color(1, 1, 1, .95); Line(circle=(cx, cy, R * 1.25, a, a + 90), width=dp(3))
-            Color(.04, .03, .12, 1); Ellipse(pos=(cx - R, cy - R), size=(2 * R, 2 * R))
-            Color(*c, .15 + .1 * pulse); Ellipse(pos=(cx - R, cy - R), size=(2 * R, 2 * R))
-            Color(*c, 1)
-            Line(circle=(cx, cy, R * .38, 50, 310), width=dp(4), cap="round")
-            Line(points=[cx, cy + R * .05, cx, cy + R * .5], width=dp(4), cap="round")
-
-    def on_touch_up(self, touch):
-        cx, cy = self.center
-        if self.collide_point(*touch.pos) and math.hypot(touch.x - cx, touch.y - cy) < min(self.size) * .4:
-            App.get_running_app().toggle(); return True
-        return super().on_touch_up(touch)
+    def _u(s, *a): s._r.pos, s._r.size = s.pos, s.size
 
 
-KV = """
-#:import dp kivy.metrics.dp
-<Txt@Label>:
-    size_hint_y: None
-    height: self.texture_size[1] + dp(4)
-    text_size: self.width, None
-    color: .85, .87, 1, 1
-<Card@BoxLayout>:
-    orientation: 'vertical'
-    padding: dp(14)
-    spacing: dp(8)
-    size_hint_y: None
-    height: self.minimum_height
-    canvas.before:
-        Color:
-            rgba: 1, 1, 1, .06
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(18)]
-        Color:
-            rgba: .55, .5, 1, .3
-        Line:
-            rounded_rectangle: (self.x, self.y, self.width, self.height, dp(18))
-            width: 1
-<Btn@Button>:
-    background_normal: ''
-    background_color: 0, 0, 0, 0
-    size_hint_y: None
-    height: dp(46)
-    bold: True
-    canvas.before:
-        Color:
-            rgba: (.42, .38, 1, 1) if self.state == 'normal' else (.62, .56, 1, 1)
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(23)]
-<Field@TextInput>:
-    size_hint_y: None
-    height: dp(44)
-    multiline: False
-    background_color: 1, 1, 1, .08
-    foreground_color: 1, 1, 1, 1
-    cursor_color: 0, .96, .83, 1
-    hint_text_color: 1, 1, 1, .35
-    padding: dp(12), dp(12)
+class Row(Button):
+    idx, sel, cb = NumericProperty(0), BooleanProperty(False), ObjectProperty(None, allownone=True)
 
-FloatLayout:
-    Space:
-    ScreenManager:
-        id: sm
-        Screen:
-            name: 'home'
-            BoxLayout:
-                orientation: 'vertical'
-                padding: dp(20), dp(40), dp(20), dp(20)
-                spacing: dp(10)
-                BoxLayout:
-                    size_hint_y: None
-                    height: dp(44)
-                    Label:
-                        text: 'AMINIUM'
-                        bold: True
-                        font_size: '22sp'
-                        halign: 'left'
-                        text_size: self.size
-                        valign: 'middle'
-                        color: .85, .87, 1, 1
-                    Btn:
-                        text: 'REGISTRY'
-                        size_hint_x: None
-                        width: dp(120)
-                        on_release: sm.current = 'reg'
-                Orb:
-                    id: orb
-                Label:
-                    id: status
-                    text: 'TAP TO CONNECT'
-                    size_hint_y: None
-                    height: dp(30)
-                    bold: True
-                    font_size: '16sp'
-                Card:
-                    GridLayout:
-                        cols: 2
-                        size_hint_y: None
-                        height: dp(96)
-                        Txt:
-                            text: 'DOWNLOAD'
-                            font_size: '11sp'
-                        Txt:
-                            text: 'UPLOAD'
-                            font_size: '11sp'
-                        Label:
-                            id: dl_speed
-                            text: '0 B/s'
-                            font_size: '20sp'
-                            bold: True
-                            color: 0, .96, .83, 1
-                        Label:
-                            id: ul_speed
-                            text: '0 B/s'
-                            font_size: '20sp'
-                            bold: True
-                            color: .7, .6, 1, 1
-                        Txt:
-                            id: dl_total
-                            text: 'Total 0 B'
-                            font_size: '12sp'
-                        Txt:
-                            id: ul_total
-                            text: 'Total 0 B'
-                            font_size: '12sp'
-                    Txt:
-                        id: timer
-                        text: '00:00:00'
-                        halign: 'center'
-                        font_size: '12sp'
-        Screen:
-            name: 'reg'
-            BoxLayout:
-                orientation: 'vertical'
-                padding: dp(16), dp(36), dp(16), dp(12)
-                spacing: dp(10)
-                BoxLayout:
-                    size_hint_y: None
-                    height: dp(44)
-                    Btn:
-                        text: '< BACK'
-                        size_hint_x: None
-                        width: dp(100)
-                        on_release: sm.current = 'home'
-                    Label:
-                        text: 'REGISTRY'
-                        bold: True
-                        font_size: '20sp'
-                ScrollView:
-                    BoxLayout:
-                        orientation: 'vertical'
-                        size_hint_y: None
-                        height: self.minimum_height
-                        spacing: dp(12)
-                        Card:
-                            Txt:
-                                text: 'WARP ACCOUNT'
-                                bold: True
-                            Txt:
-                                id: acc_state
-                                text: '-'
-                            Btn:
-                                text: 'Register new WARP account'
-                                on_release: app.register()
-                            Btn:
-                                text: 'Delete account'
-                                on_release: app.delete_account()
-                            Txt:
-                                text: 'config.json = made by usque register: it asks Cloudflare for a device, creates your private key and stores key + token + endpoint in the app private folder.'
-                                font_size: '11sp'
-                            Txt:
-                                text: 'Or paste a config.json made on PC with usque.exe:'
-                                font_size: '12sp'
-                            Field:
-                                id: in_cfg
-                                hint_text: '{ ... config.json ... }'
-                            Btn:
-                                text: 'Save pasted config'
-                                on_release: app.paste_config()
-                        Card:
-                            Txt:
-                                text: 'GET WARP KEY'
-                                bold: True
-                            Txt:
-                                id: warp_out
-                                text: 'Creates a WireGuard WARP account (also works in the official WireGuard app).'
-                                font_size: '12sp'
-                            Btn:
-                                text: 'Get WARP key'
-                                on_release: app.get_warp()
-                            Btn:
-                                text: 'Copy WireGuard config'
-                                on_release: app.copy_wg()
-                        Card:
-                            Txt:
-                                text: 'CONNECTION'
-                                bold: True
-                            BoxLayout:
-                                size_hint_y: None
-                                height: dp(40)
-                                Txt:
-                                    text: 'HTTP/2 (use if UDP blocked)'
-                                Switch:
-                                    id: sw_h2
-                                    size_hint_x: None
-                                    width: dp(80)
-                            BoxLayout:
-                                size_hint_y: None
-                                height: dp(40)
-                                Txt:
-                                    text: 'Share SOCKS5 on network'
-                                Switch:
-                                    id: sw_share
-                                    size_hint_x: None
-                                    width: dp(80)
-                            Field:
-                                id: in_port
-                                hint_text: 'SOCKS5 port (10820)'
-                                input_filter: 'int'
-                            Field:
-                                id: in_user
-                                hint_text: 'username (optional)'
-                            Field:
-                                id: in_pw
-                                hint_text: 'password (optional)'
-                                password: True
-                            Btn:
-                                text: 'Save settings'
-                                on_release: app.save()
-                        Card:
-                            Txt:
-                                text: 'CONFIG & PING'
-                                bold: True
-                            Field:
-                                id: in_sni
-                                hint_text: 'SNI (e.g. zt-masque.cloudflareclient.com)'
-                            Field:
-                                id: in_extra
-                                hint_text: 'extra usque args (optional)'
-                            BoxLayout:
-                                size_hint_y: None
-                                height: dp(40)
-                                Txt:
-                                    text: 'L4 mode (l4-socks)'
-                                Switch:
-                                    id: sw_l4
-                                    size_hint_x: None
-                                    width: dp(80)
-                            Field:
-                                id: in_prefix
-                                hint_text: 'scan prefixes: 162.159.198, 162.159.192'
-                            Btn:
-                                text: 'Ping current endpoint'
-                                on_release: app.ping_ep()
-                            Btn:
-                                text: 'Scan endpoints'
-                                on_release: app.scan_ep()
-                            Btn:
-                                text: 'Use best IP in config'
-                                on_release: app.apply_ep()
-                            Txt:
-                                id: scan_out
-                                text: 'Ping = TLS over TCP 443 (UDP/QUIC cannot be pinged).'
-                                font_size: '12sp'
-                        Card:
-                            Txt:
-                                text: 'SHARE TO V2RAY'
-                                bold: True
-                            Txt:
-                                id: link
-                                text: '-'
-                            Btn:
-                                text: 'Copy socks5:// link'
-                                on_release: app.copy_link()
-                            Btn:
-                                text: 'Copy v2ray outbound JSON'
-                                on_release: app.copy_outbound()
-                        Card:
-                            Txt:
-                                text: 'LOG'
-                                bold: True
-                            Txt:
-                                id: log
-                                text: ''
-                                font_size: '11sp'
-"""
+    def __init__(s, **k):
+        k.setdefault("background_normal", ""); k.setdefault("background_down", ""); k.setdefault("font_name", FONT)
+        super().__init__(**k)
+        s.halign, s.valign, s.font_size = "left", "middle", sp(12)
+        s.bind(size=lambda *_: setattr(s, "text_size", (s.width - dp(16), s.height)), sel=s._c); s._c()
+
+    def _c(s, *a): s.background_color = ACC if s.sel else (.12, .16, .25, 1)
+
+    def on_release(s):
+        if s.cb: s.cb(s.idx)
 
 
-# ---------------------------------------------------------------- app
-class AetherApp(App):
-    def build(self):
-        self.title = "AMINIUM"
-        Window.clearcolor = (.02, .02, .06, 1)
-        Window.bind(on_keyboard=self.on_key)
-        self.meter, self.proc, self.srv, self.state, self.t0 = Meter(), None, None, "off", 0
-        self.logs, self.last = [], (0, 0)
-        self.cfgp = os.path.join(self.user_data_dir, "config.json")
-        self.setp = os.path.join(self.user_data_dir, "settings.json")
-        self.root = Builder.load_string(KV)
-        self.load()
-        Clock.schedule_interval(self.stats, 1)
-        return self.root
+class Table(BoxLayout):
+    """Scrollable, tap-to-select list. Each row: {key, title, sub, score, color}."""
+    def __init__(s, h=340):
+        super().__init__(orientation="vertical", size_hint_y=None, height=dp(h))
+        s.rows, s.sel_key = [], None
+        s.rv = RecycleView(bar_width=dp(4), viewclass=Row)
+        s.lay = RecycleBoxLayout(default_size=(None, dp(58)), default_size_hint=(1, None), size_hint_y=None, orientation="vertical", spacing=dp(3))
+        s.lay.bind(minimum_height=s.lay.setter("height"))
+        s.rv.add_widget(s.lay); s.add_widget(s.rv)
 
-    # ---- helpers
-    @property
-    def ids(self): return self.root.ids
+    def set_rows(s, rows): s.rows = rows; s._data()
 
-    def on_key(self, w, key, *a):
-        if key == 27 and self.ids.sm.current == "reg":
-            self.ids.sm.current = "home"; return True
+    def _tap(s, i):
+        if i < len(s.rows): s.sel_key = s.rows[i]["key"]; s._data()
 
-    def exe(self):
-        try:
-            from jnius import autoclass
-            ctx = autoclass("org.kivy.android.PythonActivity").mActivity
-            return os.path.join(ctx.getApplicationInfo().nativeLibraryDir, "libusque.so")
-        except Exception:
-            return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "usque.exe" if os.name == "nt" else "usque")
+    def _data(s):
+        s.rv.data = [{"text": fa(r["title"] + "\n" + r["sub"]), "idx": i, "sel": r["key"] == s.sel_key, "cb": s._tap,
+                      "color": r.get("color", TXT)} for i, r in enumerate(s.rows)]
 
-    def log(self, msg):
-        def add(dt):
-            self.logs = (self.logs + [f"[{time.strftime('%H:%M:%S')}] {msg}"])[-25:]
-            self.ids.log.text = "\n".join(self.logs)
-        Clock.schedule_once(add)
+    def selected(s): return next((r for r in s.rows if r["key"] == s.sel_key), None)
 
-    def set_state(self, st, note=None):
-        def do(dt):
-            self.state = st
-            self.ids.orb.state = st
-            self.ids.status.text = note or {"off": "TAP TO CONNECT", "wait": "CONNECTING...", "on": "CONNECTED"}[st]
-            self.ids.status.color = COL[st] + (1,)
-            if st == "on": self.t0, self.meter.up, self.meter.down = time.time(), 0, 0
-            self.refresh_link()
-        Clock.schedule_once(do)
 
-    def cfg(self):
-        return {"h2": self.ids.sw_h2.active, "share": self.ids.sw_share.active,
-                "port": self.ids.in_port.text or "10820",
-                "user": self.ids.in_user.text.strip(), "pw": self.ids.in_pw.text,
-                "sni": self.ids.in_sni.text.strip(), "extra": self.ids.in_extra.text.strip(),
-                "l4": self.ids.sw_l4.active, "prefix": self.ids.in_prefix.text.strip()}
+# ---- main screen
+class UI(BoxLayout):
+    def __init__(self, **k):
+        super().__init__(orientation="vertical", **k)
+        with self.canvas.before:
+            Color(*BG); self._bg = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=lambda *_: setattr(self._bg, "pos", self.pos), size=lambda *_: setattr(self._bg, "size", self.size))
+        self.cfg = load_cfg()
+        self.q, self.stop = queue.Queue(), threading.Event()
+        self.st, self.alive, self._opts = None, True, {}
+        self.qst, self.cur, self.qlock, self._qkey, self._qmsg = "idle", "quick", (0, ""), None, ""
+        self.tbl, self.data, self.dirty, self.prog, self.pool_views, self.logs = {}, {}, set(), {}, [], []
+        self._lan, self._lan_t, self.prev, self._pt = "127.0.0.1", 0, (0, 0, time.time()), 0
+        self.qlog = lambda m: self.q.put(("log", m))
+        self.sm = ScreenManager(transition=NoTransition()); self.add_widget(self.sm)
+        for key, fn in (("quick", self.page_quick), ("dash", self.page_dash), ("scan", self.page_scan),
+                        ("online", self.page_online), ("pool", self.page_pool), ("log", self.page_log)):
+            self.page(key, fn)
+        nav = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(3), padding=dp(3)); self.nav = {}
+        for key, t in NAV:
+            b = RBtn(text=fa(t), font_size=sp(12), bg=CARD, on_release=lambda b, key=key: self.show(key)); nav.add_widget(b); self.nav[key] = b
+        self.add_widget(nav); self.show("quick")
+        Clock.schedule_interval(self.poll, 0.5); Clock.schedule_interval(self.tick, 0.4)
+        threading.Thread(target=self.poller, daemon=True).start()
 
-    def load(self):
-        try: d = json.load(open(self.setp))
-        except (OSError, ValueError): d = {}
-        self.ids.sw_h2.active = d.get("h2", True)
-        self.ids.sw_share.active = d.get("share", False)
-        self.ids.in_port.text = str(d.get("port", "10820"))
-        self.ids.in_user.text, self.ids.in_pw.text = d.get("user", ""), d.get("pw", "")
-        self.ids.in_sni.text, self.ids.in_extra.text = d.get("sni", ""), d.get("extra", "")
-        self.ids.sw_l4.active, self.ids.in_prefix.text = d.get("l4", False), d.get("prefix", "162.159.198")
-        self.refresh_link()
+    # ----- layout helpers -----
+    def page(self, key, fn):
+        sv = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        col = BoxLayout(orientation="vertical", size_hint_y=None, padding=dp(10), spacing=dp(10))
+        col.bind(minimum_height=col.setter("height")); sv.add_widget(col)
+        s = Screen(name=key); s.add_widget(sv); self.sm.add_widget(s); fn(col)
 
-    def save(self):
-        json.dump(self.cfg(), open(self.setp, "w")); self.refresh_link(); self.log("Settings saved.")
+    @staticmethod
+    def r(*ws, h=46):
+        b = BoxLayout(size_hint_y=None, height=dp(h), spacing=dp(6))
+        for w in ws: w.size_hint_y = 1; b.add_widget(w)
+        return b
 
-    def link(self):
-        c = self.cfg(); ip = lan_ip() if c["share"] else "127.0.0.1"
-        auth = f"{c['user']}:{c['pw']}@" if c["user"] else ""
-        return ip, c["port"], f"socks5://{auth}{ip}:{c['port']}"
+    def ent(self, val="", w=110, num=True):
+        return TextInput(text=str(val), multiline=False, input_filter="int" if num else None, size_hint_x=None, width=dp(w),
+                         background_color=(.14, .19, .29, 1), foreground_color=TXT, cursor_color=TXT, padding=[dp(8), dp(12)], font_size=sp(14))
 
-    def refresh_link(self):
-        ip, port, url = self.link()
-        self.ids.link.text = url + ("" if self.cfg()["share"] else "\n(this phone only - enable sharing for other devices)")
-        try:
-            c = json.load(open(self.cfgp))
-            self.ids.acc_state.text = f"Account READY\nendpoint {c.get('endpoint_v4', '?')}  id {str(c.get('id', ''))[:8]}..."
-        except (OSError, ValueError):
-            self.ids.acc_state.text = "No account yet - tap Register"
+    def fld(self, parent, text, val):
+        t = self.ent(val); parent.add_widget(self.r(WL(text, 13), t)); return t
 
-    def copy_link(self):
-        Clipboard.copy(self.link()[2]); self.log("socks5 link copied.")
+    def sw(self, parent, text, key, default=True):
+        s = Switch(active=bool(self.cfg.get(key, default)), size_hint_x=None, width=dp(90)); parent.add_widget(self.r(WL(text, 13), s)); return s
 
-    def copy_outbound(self):
-        ip, port, _ = self.link(); c = self.cfg()
-        srv = {"address": ip, "port": int(port)}
-        if c["user"]: srv["users"] = [{"user": c["user"], "pass": c["pw"]}]
-        Clipboard.copy(json.dumps({"tag": "warp", "protocol": "socks", "settings": {"servers": [srv]}}, indent=2))
-        self.log("v2ray outbound JSON copied.")
+    def spin(self, parent, text, val, values):
+        s = Spinner(text=val, values=values, size_hint_x=None, width=dp(210), background_normal="", background_color=(.14, .19, .29, 1))
+        parent.add_widget(self.r(WL(text, 13), s)); return s
 
-    # ---- registry
-    def register(self):
-        def work():
-            self.log("Registering with Cloudflare...")
-            try:
-                p = subprocess.Popen([self.exe(), "-c", self.cfgp, "register", "-a", "-n", "aether-android"],
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     text=True, errors="replace")
-                try: p.stdin.write("y\n"); p.stdin.close()
-                except OSError: pass
-                for l in p.stdout: self.log(l.rstrip())
-                p.wait()
-            except OSError as e:
-                self.log(f"Cannot run usque: {e}")
-            Clock.schedule_once(lambda dt: self.refresh_link())
-        threading.Thread(target=work, daemon=True).start()
+    def head(self, c, title, sub):
+        c.add_widget(WL(title, 22, bold=True)); c.add_widget(WL(sub, 12, MUT))
 
-    def out(self, msg):
-        self.log(msg.splitlines()[0])
-        Clock.schedule_once(lambda dt: setattr(self.ids.scan_out, "text", msg))
+    def table(self, parent, key):
+        t = Table(); self.tbl[key], self.data[key] = t, []; parent.add_widget(t); return t
 
-    def sni(self):
-        return self.ids.in_sni.text.strip() or "consumer-masque.cloudflareclient.com"
+    def show(self, k):
+        self.cur = k; self.sm.current = k
+        for n, b in self.nav.items(): b.bg = ACC if n == k else CARD
 
-    def ping_ep(self):
-        def work():
-            try:
-                d = json.load(open(self.cfgp)); pin = pin_of(self.cfgp)
-                ip = str(d.get("endpoint_h2_v4") or d.get("endpoint_v4", "")).split(":")[0]
-            except Exception as e:
-                return self.out(f"Need a valid config first ({type(e).__name__})")
-            r = [x for x in (check_endpoint(ip, 443, pin, self.sni()) for _ in range(3)) if x[0]]
-            self.out(f"{ip}: " + (f"{min(x[0] for x in r):.0f} ms, key {'OK' if r[0][1] else 'MISMATCH'}"
-                                  if r else "no answer - this IP is probably blocked"))
-        threading.Thread(target=work, daemon=True).start()
+    def log(self, m):
+        self.logs.append(time.strftime("%H:%M:%S  ") + str(m)); del self.logs[:-150]
+        if hasattr(self, "log_lbl"): self.log_lbl.set("\n".join(self.logs))
 
-    def scan_ep(self):
-        def work():
-            try: pin = pin_of(self.cfgp)
-            except Exception as e: return self.out(f"Need a valid config first ({type(e).__name__})")
-            pre = [p.strip() for p in (self.ids.in_prefix.text or "162.159.198").split(",") if p.strip()]
-            self.out("Scanning... (20-60 s)")
-            ips = [f"{p}.{i}" for p in pre for i in range(1, 255)]
-            with ThreadPoolExecutor(48) as ex:
-                res = list(ex.map(lambda ip: (ip,) + check_endpoint(ip, 443, pin, self.sni(), 2.5), ips))
-            res = sorted([r for r in res if r[1]], key=lambda r: (not r[2], r[1]))
-            good = [r for r in res if r[2]]; self.best = good[0][0] if good else None
-            lines = [f"{ip}  {ms:.0f} ms  {'OK' if ok else 'key mismatch'}" for ip, ms, ok in res[:8]]
-            self.out(f"{len(res)} answered, {len(good)} genuine.\n" + "\n".join(lines)
-                     + (f"\nBest: {self.best} - tap 'Use best IP'" if self.best else ""))
-        threading.Thread(target=work, daemon=True).start()
+    def copy(self, v):
+        if v: Clipboard.copy(str(v)); self.log(f"کپی شد: {v}")
 
-    def apply_ep(self):
-        ip = getattr(self, "best", None)
-        if not ip: return self.out("Run Scan first.")
-        d = json.load(open(self.cfgp)); json.dump(d, open(self.cfgp + ".bak", "w"))
-        d["endpoint_v4"] = d["endpoint_h2_v4"] = ip; json.dump(d, open(self.cfgp, "w"), indent=2)
-        self.out(f"Endpoint set to {ip} (backup saved). Reconnect.")
-        Clock.schedule_once(lambda dt: self.refresh_link())
+    # ----- pages -----
+    def page_quick(self, c):
+        c.add_widget(WL("NetFree", 26, ACC, True, center=True)); c.add_widget(WL("اتصال هوشمند و پایدار", 12, MUT, center=True))
+        a = AnchorLayout(size_hint_y=None, height=dp(220))
+        self.q_btn = RBtn(text=fa("اتصال"), font_size=sp(28), bg=GRY, size_hint=(None, None), size=(dp(190), dp(190)), circle=True,
+                          on_release=lambda *_: self.quick_toggle())
+        a.add_widget(self.q_btn); c.add_widget(a)
+        self.q_status, self.q_info, self.q_speed = WL("آماده اتصال", 16, TXT, True, center=True), WL("", 12, MUT, center=True), WL("", 12, MUT, center=True)
+        for w in (self.q_status, self.q_info, self.q_speed): c.add_widget(w)
+        k = Card(); self.qlan = self.sw(k, "اشتراک با دستگاه‌های دیگر (هات‌اسپات)", "qlan", False)
+        self.qsec = self.sw(k, "فقط مسیرهای تاییدشده (یوتیوب + سرعت)", "qsec", True); c.add_widget(k)
+        self.q_addr = WL("", 17, ACC, True, center=True); c.add_widget(self.q_addr)
+        c.add_widget(B("کپی آدرس", lambda: self.copy(self.q_addr.raw), GRY))
+        c.add_widget(WL("با زدن دکمه، VPN واقعی (آیکون کلید) روشن می‌شود و کل گوشی از مسیر NetFree می‌رود.\n"
+                        "با بستن برنامه هم اتصال ادامه دارد؛ برای قطع، دوباره برنامه را باز کنید و «قطع» را بزنید.", 11, MUT, center=True))
 
-    def get_warp(self):
-        def work():
-            self.log("Requesting WARP key from Cloudflare...")
-            try:
-                r = register_warp(); self.wg = r["wg"]
-                txt = f"OK  id {r['id'][:8]}...  license {r['license'] or '-'}\nWireGuard config ready - tap Copy."
-                Clock.schedule_once(lambda dt: setattr(self.ids.warp_out, "text", txt))
-            except Exception as e:
-                self.log(f"Get WARP failed: {type(e).__name__}: {e}")
-        threading.Thread(target=work, daemon=True).start()
+    def page_dash(self, c):
+        self.head(c, "داشبورد اتصال", "سرویس را روشن کنید، سپس آدرس را در برنامه وارد کنید")
+        k = Card(); self.v_state, self.v_speed, self.v_conn = WL("", 15, bold=True), WL("", 13), WL("", 13)
+        self.s_socks, self.s_fwd = WL("", 12, MUT), WL("", 12, MUT)
+        for w in (self.v_state, self.v_speed, self.v_conn, self.s_socks, self.s_fwd): k.add_widget(w)
+        c.add_widget(k)
 
-    def copy_wg(self):
-        Clipboard.copy(getattr(self, "wg", "")); self.log("WireGuard config copied.")
+        k = Card(); k.add_widget(WL("SOCKS5 / HTTP Server", 16, bold=True))
+        self.port = self.fld(k, "پورت", self.cfg.get("port", 1080)); self.lan = self.sw(k, "اشتراک روی شبکه (هات‌اسپات)", "lan", False)
+        self.frag = self.sw(k, "TLS fragment", "frag"); self.doh = self.sw(k, "DNS امن (DoH)", "doh")
+        self.lbl_up = WL("", 12, MUT); k.add_widget(self.lbl_up)
+        self.b_socks = B("روشن کردن سرور", self.toggle_socks); k.add_widget(self.b_socks)
+        k.add_widget(self.r(B("تست اتصال", self.test_socks, GRY), B("کپی آدرس", lambda: self.copy(self.addr.raw), GRY)))
+        k.add_widget(B("حذف آپ‌استریم‌ها", lambda: self.cmd("clear_up"), GRY))
+        self.addr = WL("", 17, ACC, True, center=True); k.add_widget(self.addr); c.add_widget(k)
 
-    def paste_config(self):
-        try:
-            json.loads(self.ids.in_cfg.text)
-            open(self.cfgp, "w").write(self.ids.in_cfg.text); self.log("config.json saved.")
-        except ValueError:
-            self.log("That is not valid JSON.")
-        self.refresh_link()
+        k = Card(); k.add_widget(WL("Cloudflare IP Forwarder", 16, bold=True))
+        self.fport = self.fld(k, "پورت", self.cfg.get("fport", 10443)); self.flan = self.sw(k, "اشتراک روی شبکه", "flan", False)
+        self.ffrag = self.sw(k, "TLS fragment", "ffrag"); self.fsni = self.spin(k, "SNI", self.cfg.get("fsni", SNIS[0]), SNIS)
+        self.lbl_ip = WL("", 12, MUT); k.add_widget(self.lbl_ip)
+        self.b_fwd = B("روشن کردن فوروارد", self.toggle_fwd); k.add_widget(self.b_fwd)
+        k.add_widget(self.r(B("کپی آدرس", lambda: self.copy(self.faddr.raw), GRY),
+                            B("حذف IPها", lambda: self.cmd("clear_ip"), GRY)))
+        self.faddr = WL("", 17, ACC, True, center=True); k.add_widget(self.faddr)
+        k.add_widget(WL("کانفیگ V2Ray/Xray (آدرس سرور) را روی این آدرس بگذارید؛ برنامه خودش سالم‌ترین IP را انتخاب و در صورت خرابی عوض می‌کند.", 11, MUT))
+        c.add_widget(k)
 
-    def delete_account(self):
-        if self.state == "off" and os.path.exists(self.cfgp): os.remove(self.cfgp)
-        self.refresh_link()
+    def page_scan(self, c):
+        self.head(c, "اسکن IP کلودفلر", "اسکن رنج‌های بزرگ با چند نمونه، جیتر و تایید واقعی کلودفلر")
+        k = Card(); self.sni1 = self.spin(k, "SNI", self.cfg.get("sni1", SNIS[0]), SNIS)
+        self.n1 = self.fld(k, "تعداد IP برای تست", self.cfg.get("n1", 2000)); self.smp = self.fld(k, "نمونه برای هر IP", 3)
+        self.w1 = self.fld(k, "هم‌زمان", 100); self.ver = self.sw(k, "تایید کلودفلر", "ver")
+        k.add_widget(WL("رنج‌ها (هر خط یک CIDR):", 12, MUT))
+        self.rng = TextInput(text="\n".join(self.cfg.get("ranges", CF)), size_hint_y=None, height=dp(150), font_size=sp(11),
+                             background_color=(.14, .19, .29, 1), foreground_color=TXT, cursor_color=TXT)
+        k.add_widget(self.rng)
+        k.add_widget(self.r(B("شروع اسکن", self.scan, ACC), B("توقف", self.stop.set, RED)))
+        k.add_widget(B("بازنشانی رنج‌ها به لیست بزرگ پیش‌فرض", self.reset_ranges, GRY))
+        self.prog["scan"] = ProgressBar(max=1, size_hint_y=None, height=dp(10)); k.add_widget(self.prog["scan"]); c.add_widget(k)
+        k = Card()
+        k.add_widget(self.r(B("اتصال به IP انتخابی", lambda: self.connect_ip(False), GRN, size=12), B("اتصال خودکار (۵ بهترین)", lambda: self.connect_ip(True), GRN, size=12)))
+        k.add_widget(self.r(B("افزودن به استخر", self.add_ip), B("کپی IP", lambda: self.copy((self.sel("scan") or {}).get("ip")), GRY)))
+        self.table(k, "scan"); c.add_widget(k)
 
-    # ---- connect
-    def toggle(self):
-        if self.state == "off": self.connect()
-        else: self.disconnect()
+    def page_online(self, c):
+        self.head(c, "پروکسی آنلاین", "دریافت لیست‌های عمومی و تست واقعی (تونل، تاخیر، سلامت TLS)")
+        k = Card(); self.kind = self.spin(k, "نوع", "SOCKS5", ("SOCKS5", "HTTP"))
+        self.n2 = self.fld(k, "تعداد", self.cfg.get("n2", 400)); self.w2 = self.fld(k, "هم‌زمان", 120); self.sec = self.sw(k, "فقط TLS امن", "sec", False)
+        k.add_widget(self.r(B("دریافت و تست", self.online), B("توقف", self.stop.set, RED)))
+        self.prog["online"] = ProgressBar(max=1, size_hint_y=None, height=dp(10)); k.add_widget(self.prog["online"]); c.add_widget(k)
+        k = Card()
+        k.add_widget(self.r(B("اتصال (انتخابی)", lambda: self.connect_proxy(False), GRN, size=12), B("اتصال خودکار (۵ بهترین)", lambda: self.connect_proxy(True), GRN, size=12)))
+        k.add_widget(self.r(B("افزودن به استخر", self.add_proxy), B("کپی", lambda: self.copy((self.sel("online") or {}).get("addr")), GRY)))
+        self.table(k, "online"); c.add_widget(k)
 
-    def connect(self):
-        c = self.cfg()
-        if not os.path.exists(self.cfgp):
-            self.ids.sm.current = "reg"; return self.log("Register a WARP account first.")
-        bind = "0.0.0.0" if c["share"] else "127.0.0.1"
-        if not port_free(bind, c["port"]) or not port_free("127.0.0.1", INTERNAL):
-            return self.log(f"Port {c['port']} or {INTERNAL} is busy. Change the port.")
-        self.masque_ok = False
-        self.set_state("wait")
-        threading.Thread(target=self.run_core, args=(c, bind), daemon=True).start()
+    def page_pool(self, c):
+        self.head(c, "استخر اتصال", "هر مورد سالم‌تر و سریع‌تر باشد اولویت دارد؛ موارد خراب موقتاً کنار گذاشته می‌شوند")
+        for title, key, rm, clr in (("IPهای کلودفلر (برای Forwarder)", "ip_pool", "rm_ip", "clear_ip"), ("پروکسی‌های آپ‌استریم (برای SOCKS5)", "up_pool", "rm_up", "clear_up")):
+            k = Card(); k.add_widget(WL(title, 14, bold=True)); t = self.table(k, "pool_" + key); self.pool_views.append((t, key, rm))
+            k.add_widget(self.r(B("حذف انتخابی", lambda t=t, rm=rm: self.pool_rm(t, rm), GRY), B("پاک کردن همه", lambda clr=clr: self.cmd(clr), RED))); c.add_widget(k)
 
-    def run_core(self, c, bind):
-        l4 = c["l4"]
-        args = [self.exe(), "-c", self.cfgp, "l4-socks" if l4 else "socks", "-b", "127.0.0.1", "-p", str(INTERNAL)]
-        if c["h2"] and not l4: args.append("--http2")
-        if c["sni"] and not l4: args += ["-s", c["sni"]]
-        if c["extra"]: args += shlex.split(c["extra"])
-        self.log("run: " + " ".join(args[1:]))
-        try:
-            p = self.proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                             text=True, errors="replace")
-        except OSError as e:
-            self.log(f"Cannot run usque: {e}"); return self.set_state("off", "usque not found - see Registry log")
-        threading.Thread(target=self.reader, args=(p,), daemon=True).start()
-        ok = False
-        for _ in range(25):
-            if p.poll() is not None: break
-            try:
-                ok = socks5_trace(INTERNAL, 6).get("warp") in ("on", "plus")
-            except Exception as e:
-                ok = False
-                if self.masque_ok:  # usque says MASQUE is up: accept a plain tunnel test
-                    try: ok = socks_ok(INTERNAL)
-                    except Exception as e2: e = e2
-                if not ok: self.log(f"test: {type(e).__name__}: {e}")
-            if ok or self.state == "off": break
-            time.sleep(1.5)
-        if not ok:
-            self.log("Could not reach WARP. Try the HTTP/2 switch or re-register.")
-            return Clock.schedule_once(lambda dt: self.disconnect("FAILED - open Registry > LOG"))
-        try:
-            self.srv = Socks5Server(bind, c["port"], self.meter, c["user"], c["pw"])
-        except OSError as e:
-            self.log(f"Cannot open port: {e}"); return Clock.schedule_once(lambda dt: self.disconnect())
-        self.log("Tunnel to WARP is up.")
-        Clock.schedule_once(lambda dt: self.after_core(c))
+    def page_log(self, c):
+        self.head(c, "لاگ", "رویدادهای برنامه")
+        self.log_lbl = WL("", 11, MUT, smart=False); self.log_lbl.halign = "left"; c.add_widget(self.log_lbl)
 
-    # ---- real Android VPN (key icon)
-    def after_core(self, c):
-        if platform != "android":
-            return self.set_state("on")
-        try:
-            from android import activity
-            from jnius import autoclass
-            self.vpn_args = c
-            it = autoclass("android.net.VpnService").prepare(jact())
-            if it is None: return self.vpn_go()
-            activity.bind(on_activity_result=self.vpn_result)
-            jact().startActivityForResult(it, 7001)
-        except Exception as e:
-            self.log(f"VPN error: {type(e).__name__}: {e}"); self.disconnect("VPN FAILED - see LOG")
+    # ----- quick connect -----
+    def set_quick(self, st, info=None):
+        self.qst = st
+        t, col = {"idle": ("اتصال", GRY), "connecting": ("لغو", AMB), "connected": ("قطع", GRN), "failed": ("تلاش مجدد", RED)}[st]
+        self.q_btn.text, self.q_btn.bg = fa(t), col
+        if st == "connecting": self.q_status.set("در حال اتصال ..."); self.q_status.color = AMB
+        elif st == "connected" and info:
+            self.q_status.set("متصل - دسترسی یوتیوب تایید شد"); self.q_status.color = GRN
+            self.q_info.set(f"IP خروجی: {info['ip']} ({info['loc']})   تاخیر: {info['ms']:.0f} ms")
+        elif st == "failed": self.q_status.set(info or "ناموفق"); self.q_status.color = RED; self.q_info.set("")
+        elif st == "idle": self.q_status.set("آماده اتصال"); self.q_status.color = TXT; self.q_info.set("")
 
-    def vpn_result(self, req, res, data):
-        if req != 7001: return
-        if res == -1: self.vpn_go()
-        else: self.disconnect("VPN permission denied")
+    def quick_toggle(self):
+        self._qkey = None
+        if self.qst in ("connecting", "connected"):
+            self.qlock = (time.time() + 4, "idle"); self.cmd("quick_stop"); self.vpn_stop(); self.set_quick("idle")
+        else:
+            self.qlock = (time.time() + 8, "connecting"); self.set_quick("connecting")
+            port, lan, sec = self.port_of(self.port, 1080), self.qlan.active, self.qsec.active
+            self.vpn_connect(port, lambda: self.cmd("quick_start", lan=lan, secure=sec, port=port))
 
-    def vpn_go(self):
-        try:
-            c = self.vpn_args; it = vpn_intent()
-            it.putExtra("port", int(c["port"])); it.putExtra("user", c["user"]); it.putExtra("pw", c["pw"])
-            jact().startService(it)
-            self.log("VPN service started."); self.set_state("on")
-        except Exception as e:
-            self.log(f"VPN error: {type(e).__name__}: {e}"); self.disconnect("VPN FAILED - see LOG")
+    def sync_quick(self, now, st):
+        q = st.get("quick")
+        if not q: return
+        want = q["st"]
+        if now < self.qlock[0] and ((self.qlock[1] == "idle" and want != "idle") or (self.qlock[1] == "connecting" and want == "idle")): want = None
+        if want:
+            key = (want, json.dumps(q["info"], sort_keys=True) if q.get("info") else None)
+            if key != self._qkey:
+                self._qkey = key; self.set_quick(want, q["info"])
+                if want == "failed": self.vpn_stop()
+            if q.get("msg") and q["msg"] != self._qmsg and want != "idle": self.q_status.set(q["msg"])
+            self._qmsg = q.get("msg", "")
+
+    # ----- real VPN (Android VpnService, key icon) -----
+    def _vpn_intent(self, action=None, port=None):
+        from jnius import autoclass
+        act = autoclass("org.kivy.android.PythonActivity").mActivity
+        i = autoclass("android.content.Intent")(); i.setClassName(act.getPackageName(), "org.netfree.vpn.NetFreeVpn")
+        if action: i.setAction(action)
+        if port: i.putExtra("port", str(port))
+        return act, i
+
+    def vpn_start(self, port):
+        try: act, i = self._vpn_intent(port=port); act.startService(i); self.log("VPN روشن شد")
+        except Exception as e: self.log(f"VPN: {e}")
 
     def vpn_stop(self):
-        if platform == "android":
-            try: jact().stopService(vpn_intent())
-            except Exception: pass
+        if platform != "android": return
+        try: act, i = self._vpn_intent("org.netfree.vpn.STOP"); act.startService(i)
+        except Exception as e: self.log(f"VPN: {e}")
 
-    def reader(self, p):
-        for l in p.stdout:
-            if "connected to masque" in l.lower(): self.masque_ok = True
-            self.log("usque: " + l.rstrip())
-        if p is self.proc and self.state != "off":
-            Clock.schedule_once(lambda dt: self.disconnect())
+    def vpn_connect(self, port, then):
+        if platform != "android": return then()
+        try:
+            from jnius import autoclass
+            act = autoclass("org.kivy.android.PythonActivity").mActivity
+            it = autoclass("android.net.VpnService").prepare(act)
+        except Exception as e:
+            self.log(f"VPN: {e}"); return then()
+        if it is None: self.vpn_start(port); return then()
+        from android import activity as aa
+        self._vpn = (port, then); aa.bind(on_activity_result=self._on_result); act.startActivityForResult(it, 4711)
 
-    def disconnect(self, note=None):
-        self.vpn_stop()
-        if self.srv: self.srv.stop(); self.srv = None
-        p, self.proc = self.proc, None
-        if p and p.poll() is None: p.terminate()
-        self.set_state("off", note)
+    def _on_result(self, req, res, data):
+        if req != 4711: return
+        from android import activity as aa
+        aa.unbind(on_activity_result=self._on_result)
+        port, then = self._vpn
 
-    def stats(self, dt):
-        up, down = self.meter.up, self.meter.down
-        if self.state == "on" and platform == "android" and time.time() - self.t0 > 4:
+        def ok(dt): self.vpn_start(port); then()
+
+        def no(dt): self.log("مجوز VPN داده نشد"); self.qlock = (0, ""); self.set_quick("idle")
+        Clock.schedule_once(ok if res == -1 else no)
+
+    # ----- background service (RPC) -----
+    def cmds(self, seq):
+        """Send commands to the background service (started on demand) in order, without blocking the UI."""
+        def go():
+            if not rpc("ping", 1.0) and not self.start_service(): self.q.put(("log", "سرویس پس‌زمینه اجرا نشد")); return
+            for name, kw in seq: rpc(name, 3.0, **kw)
+        threading.Thread(target=go, daemon=True).start()
+
+    def cmd(self, name, **kw): self.cmds([(name, kw)])
+
+    def start_service(self):
+        try:
+            if platform == "android":
+                from jnius import autoclass
+                act = autoclass("org.kivy.android.PythonActivity").mActivity
+                svc = autoclass(act.getPackageName() + ".ServiceNetfree")
+                try: svc.start(act, "", "NetFree", "Connection active", "")
+                except Exception: svc.start(act, "")
+            else:
+                subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "service.py")])
+        except Exception as e:
+            self.q.put(("log", f"خطا در اجرای سرویس: {e}")); return False
+        for _ in range(60):
+            if rpc("ping", 0.5): return True
+            time.sleep(0.2)
+        return False
+
+    def poller(self):
+        since = 0
+        while self.alive:
+            r = rpc("status", 1.5, since=since, opts=self._opts)
+            if r and "nlog" in r:
+                if r["nlog"] < since: since = 0
+                else: since = r["nlog"]; self.q.put(("status", r))
+            elif not r: self.q.put(("status", None))
+            time.sleep(0.5)
+
+    # ----- table / jobs -----
+    def sel(self, key): return self.tbl[key].selected()
+
+    def refresh_tree(self, key):
+        rows = sorted(self.data[key], key=lambda r: r["score"])[:600]
+        for r in rows: r["color"] = GRN if r["score"] < 300 else AMB if r["score"] < 700 else RED
+        self.tbl[key].set_rows(rows)
+
+    def start_job(self, key, jobs, fn, workers):
+        self.stop.clear(); self.data[key] = []; self.refresh_tree(key); self.prog[key].value = 0
+        self.log(f"تست {len(jobs)} هدف با {workers} رشته ...")
+
+        def wrap(j): return None if self.stop.is_set() else fn(j)
+
+        def go():
+            done = 0
+            with ThreadPoolExecutor(workers) as ex:
+                for f in as_completed([ex.submit(wrap, j) for j in jobs]):
+                    done += 1
+                    try: r = f.result()
+                    except Exception: r = None
+                    if r: self.q.put(("row", key, r))
+                    if done % 5 == 0 or done == len(jobs): self.q.put(("prog", key, done / len(jobs)))
+            self.q.put(("done", key))
+        threading.Thread(target=go, daemon=True).start()
+
+    def poll(self, dt=0):
+        try:
+            while True:
+                k, *a = self.q.get_nowait()
+                if k == "row": self.data[a[0]].append(a[1]); self.dirty.add(a[0])
+                elif k == "call": a[0]()
+                elif k == "status":
+                    self.st = a[0]
+                    if a[0] and a[0]["logs"]:
+                        self.logs += a[0]["logs"]; del self.logs[:-150]; self.log_lbl.set("\n".join(self.logs))
+                elif k == "prog": self.prog[a[0]].value = a[1]
+                elif k == "done":
+                    self.dirty.add(a[0]); self.prog[a[0]].value = 1
+                    self.log(f"پایان: {len(self.data[a[0]])} مورد سالم" + (" (متوقف شد)" if self.stop.is_set() else ""))
+                else: self.log(a[0])
+        except queue.Empty:
+            pass
+        for k in list(self.dirty): self.refresh_tree(k)
+        self.dirty.clear()
+
+    # ----- scan / online -----
+    def reset_ranges(self): self.rng.text = "\n".join(CF); self.log(f"رنج‌ها بازنشانی شد ({len(CF)} بلوک)")
+
+    def scan(self):
+        try: n, smp, w = int(self.n1.text), max(1, int(self.smp.text)), max(1, int(self.w1.text))
+        except ValueError: return self.log("مقادیر عددی نامعتبر است")
+        nets = []
+        for l in self.rng.text.splitlines():
+            l = l.split("#")[0].strip()
+            if not l: continue
+            try: nets.append(ipaddress.ip_network(l, strict=False))
+            except ValueError: self.log(f"رنج نامعتبر: {l}")
+        nets = merge_nets(nets)
+        if not nets: return self.log("رنج معتبری وارد نشده")
+        out = sample_ips(nets, n)
+        self.log(f"{len(nets)} رنج، {sum(x.num_addresses for x in nets):,} آدرس؛ نمونه‌برداری {len(out)} IP")
+        sni, ver = self.sni1.text, self.ver.active
+
+        def fn(ip):
+            r = probe_ip(ip, sni, smp, ver)
+            if r: return {"key": ip, "ip": ip, "lat": r["tls"], "score": r["score"], "title": ip,
+                          "sub": f"TLS {r['tls']:.0f} | TCP {r['tcp']:.0f} | jit {r['jit']:.0f} | {r['ok']} | score {r['score']:.0f}"}
+        self.start_job("scan", out, fn, w)
+
+    def online(self):
+        k = self.kind.text
+        try: n, w = int(self.n2.text), max(1, int(self.w2.text))
+        except ValueError: return self.log("مقادیر عددی نامعتبر است")
+        only = self.sec.active
+        self.log("دریافت لیست پروکسی‌ها ...")
+
+        def go():
+            jobs = fetch_proxies(k, n, self.qlog)
+            if not jobs: self.q.put(("log", "لیستی دریافت نشد؛ اینترنت/دسترسی به GitHub را بررسی کنید")); return
+            self.q.put(("call", lambda: self.start_job("online", jobs, fn, w)))
+
+        def fn(hp):
+            r = proxy_probe(k, *hp)
+            if not r or (only and not r["secure"]): return None
+            return {"key": r["addr"], "kind": k, "addr": r["addr"], "host": r["host"], "port": r["port"], "lat": r["lat"], "score": r["score"],
+                    "title": f"{k}  {r['addr']}", "sub": f"ping {r['lat']:.0f} | TLS {'ok' if r['secure'] else 'x'} | jit {r['jit']:.0f} | score {r['score']:.0f}"}
+        threading.Thread(target=go, daemon=True).start()
+
+    # ----- connect actions -----
+    def top(self, key, n=5): return sorted(self.data[key], key=lambda r: r["score"])[:n]
+
+    def connect_ip(self, auto):
+        rows = [r for r in (self.top("scan") if auto else [self.sel("scan")]) if r]
+        if not rows: return self.log("ابتدا اسکن کنید و یک IP انتخاب کنید")
+        self.log(f"{len(rows)} IP در استخر قرار گرفت")
+        self.cmds([("set_ip", {"items": [{"host": r["ip"], "lat": r["lat"]} for r in rows]}), ("start_fwd", self.fwd_args())]); self.show("dash")
+
+    def fwd_args(self): return {"lan": self.flan.active, "port": self.port_of(self.fport, 10443), "frag": self.ffrag.active, "sni": self.fsni.text}
+
+    def socks_args(self): return {"lan": self.lan.active, "port": self.port_of(self.port, 1080), "frag": self.frag.active, "doh": self.doh.active}
+
+    def add_ip(self):
+        r = self.sel("scan")
+        if r: self.cmd("add_ip", item={"host": r["ip"], "lat": r["lat"]}); self.log(f"{r['ip']} به استخر IP اضافه شد")
+
+    def connect_proxy(self, auto):
+        rows = [r for r in (self.top("online") if auto else [self.sel("online")]) if r]
+        if not rows: return self.log("ابتدا تست کنید و یک پروکسی انتخاب کنید")
+        self.log(f"{len(rows)} پروکسی آپ‌استریم تنظیم شد")
+        self.cmds([("set_up", {"items": [{"kind": r["kind"], "host": r["host"], "port": r["port"], "lat": r["lat"]} for r in rows]}),
+                   ("start_socks", self.socks_args())]); self.show("dash")
+
+    def add_proxy(self):
+        r = self.sel("online")
+        if r: self.cmd("add_up", item={"kind": r["kind"], "host": r["host"], "port": r["port"], "lat": r["lat"]}); self.log(f"{r['addr']} به استخر آپ‌استریم اضافه شد")
+
+    def pool_rm(self, t, rm):
+        r = t.selected()
+        if r: self.cmd(rm, host=r["ent"]["host"], port=r["ent"]["port"]); t.sel_key = None
+
+    # ----- servers -----
+    def port_of(self, e, d):
+        try: return int(e.text)
+        except ValueError: return d
+
+    def toggle_socks(self):
+        if (self.st or {}).get("socks"): self.cmd("stop_socks")
+        else: self.cmd("start_socks", **self.socks_args())
+
+
+
+    def toggle_fwd(self):
+        if (self.st or {}).get("fwd"): self.cmd("stop_fwd")
+        elif not (self.st or {}).get("ip_pool"): self.log("استخر IP خالی است؛ ابتدا از تب اسکن IP اضافه کنید")
+        else: self.cmd("start_fwd", **self.fwd_args())
+
+    def test_socks(self): self.cmd("test_socks")
+
+    # ----- periodic UI refresh -----
+    def tick(self, dt=0):
+        now, st = time.time(), self.st or {}
+        self._opts = {"frag": self.frag.active, "doh": self.doh.active, "ffrag": self.ffrag.active, "fsni": self.fsni.text}
+        if now - self._lan_t > 30: self._lan, self._lan_t = lan_ip(), now
+        srv, fwd = st.get("socks"), st.get("fwd")
+        run = lambda x: bool(x) and x["state"] == "running"
+        host = lambda x: self._lan if x["host"] == "0.0.0.0" else "127.0.0.1"
+        for lbl, name, x in ((self.s_socks, "SOCKS5", srv), (self.s_fwd, "Forwarder", fwd)):
+            lbl.set(f"{name}: {'روشن' if run(x) else 'خاموش'}"); lbl.color = GRN if run(x) else MUT
+        self.b_socks.text, self.b_socks.bg = fa("خاموش کردن" if srv else "روشن کردن سرور"), RED if srv else ACC
+        self.b_fwd.text, self.b_fwd.bg = fa("خاموش کردن" if fwd else "روشن کردن فوروارد"), RED if fwd else ACC
+        self.addr.set(f"socks5://{host(srv)}:{srv['port']}" if srv else "")
+        self.faddr.set(f"{host(fwd)}:{fwd['port']}" if fwd else "")
+        ups, ips = st.get("up_pool", []), st.get("ip_pool", [])
+        self.lbl_up.set(f"آپ‌استریم: {len(ups)} پروکسی (با failover خودکار)" if ups else "آپ‌استریم: مستقیم (بدون پروکسی)")
+        best = min(ips, key=lambda e: (min(e["fails"], 3), e["lat"] or 9e9))["host"] if ips else ""
+        self.lbl_ip.set(f"استخر: {len(ips)} IP" + (" - بهترین: " + best if ips else ""))
+
+        srvs = [x for x in (srv, fwd) if x]
+        up, dn = sum(x["up"] for x in srvs), sum(x["down"] for x in srvs)
+        pu, pd, pt = self.prev; dt = max(0.05, now - pt)
+        self.v_speed.set(f"Down {fmt(max(0, dn - pd) / dt)}/s    Up {fmt(max(0, up - pu) / dt)}/s"); self.prev = (up, dn, now)
+        self.v_conn.set(f"{sum(x['active'] for x in srvs)} فعال | {sum(x['conns'] for x in srvs)} کل | {sum(x['fail'] for x in srvs)} خطا")
+        on = any(run(x) for x in srvs)
+        self.v_state.set("متصل (سرویس پس‌زمینه)" if on else ("خاموش" if self.st else "سرویس پس‌زمینه خاموش")); self.v_state.color = GRN if on else MUT
+        self.q_speed.set(self.v_speed.raw); self.q_addr.set(self.addr.raw)
+        self.sync_quick(now, st)
+
+        if self.cur == "pool" and now - self._pt > 1.5:
+            self._pt = now
+            for t, key, rm in self.pool_views:
+                rows = []
+                for e in st.get(key, []):
+                    cd = e["until"] - now
+                    stt = "سالم" if e["fails"] == 0 else (f"استراحت {cd:.0f}s" if cd > 0 else "ناپایدار")
+                    ad = f"{e['host']}:{e['port']}"
+                    rows.append({"key": ad, "title": ad, "ent": e, "score": 0, "color": GRN if e["fails"] == 0 else AMB if cd <= 0 else RED,
+                                 "sub": f"{e['kind']} | ping {(format(e['lat'], '.0f') if e['lat'] else '-')} | err {e['fails']} | {stt}"})
+                t.set_rows(rows)
+
+    def on_key(self, win, key, *a):
+        """Back button = send to background (keeps the proxy running) instead of killing the app."""
+        if key == 27:
             try:
                 from jnius import autoclass
-                if not autoclass(VPN_CLS).running: self.disconnect("VPN stopped - see LOG")
+                autoclass("org.kivy.android.PythonActivity").mActivity.moveTaskToBack(True); return True
             except Exception:
-                pass
-        if self.state == "on":
-            self.ids.dl_speed.text = fmt(down - self.last[1]) + "/s"
-            self.ids.ul_speed.text = fmt(up - self.last[0]) + "/s"
-            s = int(time.time() - self.t0)
-            self.ids.timer.text = f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
-        else:
-            self.ids.dl_speed.text = self.ids.ul_speed.text = "0 B/s"
-        self.last = (up, down)
-        self.ids.dl_total.text, self.ids.ul_total.text = f"Total {fmt(down)}", f"Total {fmt(up)}"
+                return False
+        return False
 
-    def on_stop(self):
-        self.disconnect()
+    def close(self):
+        """Only saves UI settings. The background service and the VPN deliberately keep running."""
+        self.alive = False
+        self.cfg.update(port=self.port.text, lan=self.lan.active, frag=self.frag.active, doh=self.doh.active, fport=self.fport.text,
+                        flan=self.flan.active, ffrag=self.ffrag.active, fsni=self.fsni.text, sni1=self.sni1.text, n1=self.n1.text,
+                        n2=self.n2.text, ver=self.ver.active, sec=self.sec.active,
+                        ranges=[l for l in self.rng.text.splitlines() if l.strip()], qlan=self.qlan.active, qsec=self.qsec.active)
+        save_cfg(self.cfg)
+
+class NetFreeApp(App):
+    title = "NetFree"
+
+    def build(self):
+        setup_font(); Window.clearcolor = BG; Window.softinput_mode = "below_target"
+        self.ui = UI(); Window.bind(on_keyboard=self.ui.on_key); return self.ui
+
+    def on_pause(self): return True  # keep servers alive in background
+
+    def on_stop(self): self.ui.close()
 
 
 if __name__ == "__main__":
-    AetherApp().run()
+    NetFreeApp().run()
