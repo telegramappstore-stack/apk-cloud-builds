@@ -47,7 +47,7 @@ android.add_libs_armeabi_v7a = libs/armeabi-v7a/*.so
 android.extract_native_libs = True
 android.useLegacyPackaging = True
 
-p4a.branch = v2024.01.21
+p4a.branch = master
 
 [buildozer]
 log_level = 2
