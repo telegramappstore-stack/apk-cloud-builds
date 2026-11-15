@@ -662,7 +662,18 @@ class CFError(Exception):
 
 # Extra panel settings written together with the clean IPs (the panel's own defaults already cover
 # protocols / fragment / alpn, so nothing extra is needed here; tls + fingerprint are added in run_build).
-PANEL_STYLE: dict = {}
+PANEL_STYLE: dict = {
+    # the panel's own default fragment (same numbers the panel ships with)
+    "fragment": {"enabled": True, "packets": "tlshello", "length": "100-200", "interval": "1-1"},
+    # wipe per-network profiles left over from earlier builds (they override the fragment / IP list per operator)
+    "ispProfiles": [
+        {"name": "MCI", "asns": [197207], "cleanAddrs": [], "ports": [], "fragment": None},
+        {"name": "Irancell", "asns": [44244], "cleanAddrs": [], "ports": [], "fragment": None},
+        {"name": "Rightel", "asns": [57218], "cleanAddrs": [], "ports": [], "fragment": None},
+        {"name": "Shatel", "asns": [31549], "cleanAddrs": [], "ports": [], "fragment": None},
+        {"name": "TCI", "asns": [58224, 12880], "cleanAddrs": [], "ports": [], "fragment": None},
+    ],
+}
 
 
 # ---- proxies -------------------------------------------------------------------------------------------
@@ -1600,8 +1611,8 @@ FORMAT_HELP = {
     "clash": "For Clash / Mihomo / Stash.",
     "singbox": "For sing-box / Hiddify / Karing.",
     "patt": "For PattNG-style clients (extra TLS disguise).",
-    "v2ray": "Plain share links.",
-    RAW: "Single share links.",
+    "v2ray": "Plain share links. They cannot carry fragment - on filtered networks use the Auto or Xray link.",
+    RAW: "Single share links (no fragment). If they show no ping, use the Auto or Xray link instead.",
 }
 
 
@@ -1834,7 +1845,7 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
                     break
         except Exception as e:
             log(f"Could not read a signed path ({e}); using the plain WS path.")
-        modes = [(False, "")]
+        modes = [(True, "with TLS fragment"), (False, "without fragment")] if f["tls"] else [(False, "")]
         scores: dict = {}
         for n, (frag, label) in enumerate(modes):
             stage(f"Testing {len(pool)} IPs on your worker {label}...".replace("  ", " "), 0.58 + 0.12 * n)
@@ -1853,7 +1864,7 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
         good = pool[:keep_n]
     warned = bool(f["verify_ws"] and pool and not good)
     if warned:
-        log(f"WARNING: no clean IP could reach your worker from this network . The configs will use "
+        log(f"WARNING: no clean IP could reach your worker from this network (even with TLS fragment). The configs will use "
             f"your worker's own address ({host}), exactly like the plain deployer. If those do not connect either, this "
             "network blocks that domain: deploy to Workers instead of Pages, or attach your own domain (Advanced > Custom domain).")
         stage("No clean IP works with this worker here - configs use its own address.", 0.75)
@@ -1979,7 +1990,7 @@ def update_deployment_ips(rec: dict, pool: list, scan_form: dict, log, stage=lam
                     break
         except Exception as e:
             log(f"Could not read the signed path ({e}); using the plain WS path.")
-    modes = [(False, "")]
+    modes = [(True, "with TLS fragment"), (False, "without fragment")] if tls else [(False, "")]
     scores: dict = {}
     for n, (frag, label) in enumerate(modes):
         stage(f"Testing {len(pool)} IPs {label}...".replace("  ", " "), 0.2 + 0.3 * n)
