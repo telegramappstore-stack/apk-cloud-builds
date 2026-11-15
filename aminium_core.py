@@ -660,6 +660,57 @@ class CFError(Exception):
     pass
 
 
+# ---- temporary proxy for talking to the freshly deployed panel (pages.dev / workers.dev are filtered) ----
+PANEL_PROXY = ""   # "" = direct. Set with set_panel_proxy("host:port" | "http://..." | "socks5://...")
+
+
+def normalize_proxy(p: str) -> str:
+    p = (p or "").strip()
+    if not p:
+        return ""
+    if "://" not in p:
+        p = "http://" + p
+    # socks5h = DNS is resolved by the proxy too (needed when the domain is poisoned/filtered locally)
+    p = re.sub(r"^socks5://", "socks5h://", p, flags=re.I)
+    p = re.sub(r"^socks4://", "socks4a://", p, flags=re.I)
+    return p
+
+
+def set_panel_proxy(p: str) -> str:
+    global PANEL_PROXY
+    PANEL_PROXY = normalize_proxy(p)
+    return PANEL_PROXY
+
+
+def panel_session(ua: str = "Mozilla/5.0 (AminiumStudio)") -> "requests.Session":
+    s = requests.Session()
+    s.headers["User-Agent"] = ua
+    if PANEL_PROXY:
+        s.proxies.update({"http": PANEL_PROXY, "https": PANEL_PROXY})
+    return s
+
+
+def panel_get(url: str, **kw):
+    kw.setdefault("timeout", 30)
+    if PANEL_PROXY:
+        kw.setdefault("proxies", {"http": PANEL_PROXY, "https": PANEL_PROXY})
+    return requests.get(url, **kw)
+
+
+def check_panel_proxy(log) -> bool:
+    """Quick sanity check of the proxy (goes out through it to Cloudflare's trace endpoint)."""
+    if not PANEL_PROXY:
+        return True
+    try:
+        r = panel_get("https://www.cloudflare.com/cdn-cgi/trace", timeout=15)
+        ok = r.status_code == 200 and "colo=" in r.text
+    except Exception as e:
+        log(f"Proxy check failed: {e}")
+        return False
+    log("Proxy works - panel requests will go through it." if ok else "Proxy answered, but not like Cloudflare.")
+    return ok
+
+
 class CF:
     """Tiny Cloudflare API client."""
 
@@ -897,8 +948,7 @@ def file_hash(fname: str, content: bytes) -> str:
 
 def fetch_sub_link(base: str, panel: str, password: str, log, wait: int = 90, ws_path: str = ""):
     """Log in to the freshly deployed panel, make sure a user exists, return (sub_url, user_name)."""
-    s = requests.Session()
-    s.headers["User-Agent"] = "Mozilla/5.0 (AminiumDeployer)"
+    s = panel_session("Mozilla/5.0 (AminiumDeployer)")
     api = f"{base}{panel}/api"
     deadline = time.time() + wait
     last = ""
@@ -1168,8 +1218,7 @@ def best_ips(results: list, n: int) -> list:
 
 
 def panel_login(base: str, panel: str, password: str, log, wait: int = 90):
-    s = requests.Session()
-    s.headers["User-Agent"] = "Mozilla/5.0 (AminiumStudio)"
+    s = panel_session("Mozilla/5.0 (AminiumStudio)")
     api = f"{base}{panel}/api"
     deadline, last = time.time() + wait, ""
     while True:
@@ -1262,7 +1311,7 @@ def fetch_configs(sub: str, log) -> dict:
         if key == "auto":
             continue
         try:
-            r = requests.get(sub + q, timeout=30, headers={"User-Agent": "AminiumStudio"})
+            r = panel_get(sub + q, timeout=30, headers={"User-Agent": "AminiumStudio"})
             if r.status_code == 200:
                 out["text"][key] = r.text
             else:
@@ -1341,6 +1390,11 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
     """Runs the whole deploy pipeline (same steps/order as the desktop app) and returns
     {"rec": rec, "out": out}. Raises CFError / Exception on failure; `log(str)` and
     `stage(text, fraction)` are called for progress, exactly like the desktop version."""
+    if f.get("proxy") is not None:
+        set_panel_proxy(f.get("proxy"))
+    if PANEL_PROXY:
+        log("Panel requests (login / users / configs) will use the temporary proxy.")
+        check_panel_proxy(log)
     cf = CF(token, log, email)
     stage("Checking your token...", 0.04)
     cf.verify()
@@ -1453,7 +1507,7 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
     if f["verify_ws"] and pool:
         stage("Reading a real signed WebSocket path from the panel...", 0.54)
         try:
-            r0 = requests.get(sub_link + "?format=base64", timeout=30, headers={"User-Agent": "AminiumStudio"})
+            r0 = panel_get(sub_link + "?format=base64", timeout=30, headers={"User-Agent": "AminiumStudio"})
             for ln in links_from_base64(r0.text):
                 mt = re.search(r"[?&]path=([^&#]+)", ln)
                 if mt:
