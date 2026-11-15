@@ -47,13 +47,24 @@ I didn't add anything that tries to suppress or spoof that warning - that would 
 app's behavior from a security scanner, which isn't something I can help build, independent of the
 app's own purpose.
 
-## Uploading a build to GitHub automatically
+## Uploading to GitHub - and having GitHub itself build the APK
 ```bash
 pip install requests
 python github_uploader.py
 ```
-Enter a GitHub **personal access token** (classic PAT with the `repo` scope, or a fine-grained PAT
-with "Contents: Read and write" on the target repo), the repo owner/name, a release tag, and the
-`.apk` file - then press **Upload to GitHub**. It creates the release if it doesn't exist yet and
-(re)uploads the file as a release asset. Tick "Remember on this PC" to save those fields (including
-the token) in `~/.aminium_github_uploader.json` on that machine only.
+Paste a GitHub **personal access token** (classic PAT with the `repo` scope; use the "Get API
+token" button to open GitHub's token page pre-filled with that scope), press **Verify token**
+(your username is read automatically - no need to type a repo owner), name the repo, pick this
+project's **folder**, and press **Upload folder to GitHub**. It will:
+1. Create the repo under your account if it doesn't exist yet.
+2. Make sure `.github/workflows/build-apk.yml` is included (adding it to the folder first if it
+   isn't there) - this is a **GitHub Actions** workflow that runs `buildozer -v android debug` on
+   GitHub's own Ubuntu runner on every push.
+3. Upload every file in the folder (skipping `.git`, `__pycache__`, `.buildozer`, `bin`, `venv`).
+4. Open the repo's **Actions** tab in your browser, where you can watch the build run. A few
+   minutes later (it downloads the Android SDK/NDK the first time) the finished `.apk` is attached
+   to a new GitHub Release in that repo and downloadable from the workflow run as well.
+
+So the push is not a "dumb" file upload - it drives an actual Android build on GitHub's servers,
+with no local Android SDK/NDK required on your machine. Tick "Remember on this PC" to save the
+token/repo/folder in `~/.aminium_github_uploader.json` on that machine only.
