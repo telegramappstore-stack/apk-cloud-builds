@@ -43,7 +43,7 @@ import time
 import uuid as uuidlib
 import webbrowser
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
@@ -665,8 +665,29 @@ class CFError(Exception):
 PANEL_STYLE: dict = {}
 
 
-# ---- temporary proxy for talking to the freshly deployed panel (pages.dev / workers.dev are filtered) ----
-PANEL_PROXY = ""   # "" = direct. Set with set_panel_proxy("host:port" | "http://..." | "socks5://...")
+# ---- proxies -------------------------------------------------------------------------------------------
+#  * manual proxy  : typed by the user, used for the panel (pages.dev / workers.dev) only
+#  * auto proxy    : when a connection error happens, working free proxies are fetched from
+#                    freeproxy.world (fallback: public lists), tested one by one against Cloudflare and
+#                    rotated automatically while the build keeps going.
+#  Every request still uses normal HTTPS with certificate checking, so a proxy only sees the tunnel
+#  (domain + traffic size), never the password / token inside it.
+PANEL_PROXY = ""          # manual
+AUTO_PROXY = False        # master switch for the automatic fallback
+AUTO_CURRENT = ""         # proxy currently picked by the automatic fallback
+PROXY_POOL: list = []
+_PROXY_BAD: set = set()
+_PX_LOCK = threading.RLock()
+_PX_LOG = print
+FREEPROXY_URL = "https://www.freeproxy.world/"
+FALLBACK_PROXY_LISTS = [
+    ("http", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"),
+    ("socks5", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt"),
+    ("http", "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text"),
+]
+_PX_TEST_URL = "https://www.cloudflare.com/cdn-cgi/trace"
+_SCHEME = {"http": "http", "https": "http", "socks4": "socks4a", "socks5": "socks5h"}
+_IPPORT = re.compile(r"(?:(https?|socks4|socks5)://)?((?:\d{1,3}\.){3}\d{1,3}):(\d{2,5})")
 
 
 def normalize_proxy(p: str) -> str:
@@ -675,8 +696,7 @@ def normalize_proxy(p: str) -> str:
         return ""
     if "://" not in p:
         p = "http://" + p
-    # socks5h = DNS is resolved by the proxy too (needed when the domain is poisoned/filtered locally)
-    p = re.sub(r"^socks5://", "socks5h://", p, flags=re.I)
+    p = re.sub(r"^socks5://", "socks5h://", p, flags=re.I)   # let the proxy resolve DNS too
     p = re.sub(r"^socks4://", "socks4a://", p, flags=re.I)
     return p
 
@@ -687,27 +707,157 @@ def set_panel_proxy(p: str) -> str:
     return PANEL_PROXY
 
 
+def set_auto_proxy(on: bool) -> None:
+    global AUTO_PROXY
+    AUTO_PROXY = bool(on)
+
+
+def set_proxy_logger(fn) -> None:
+    global _PX_LOG
+    _PX_LOG = fn or print
+
+
+def effective_proxy(scope: str = "panel") -> str:
+    if AUTO_CURRENT:
+        return AUTO_CURRENT
+    if scope == "panel" and PANEL_PROXY and PANEL_PROXY not in _PROXY_BAD:
+        return PANEL_PROXY
+    return ""
+
+
+def _parse_freeproxy_world(html: str, scheme: str) -> list:
+    out = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S | re.I):
+        ip = re.search(r"\b((?:\d{1,3}\.){3}\d{1,3})\b", tr)
+        if not ip:
+            continue
+        pt = re.search(r"[?&]port=(\d{2,5})", tr) or re.search(r">\s*(\d{2,5})\s*<", tr)
+        if pt:
+            out.append(f"{scheme}://{ip.group(1)}:{pt.group(1)}")
+    return out
+
+
+def fetch_free_proxies(log, limit: int = 80) -> list:
+    ua = {"User-Agent": "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36"}
+    cands: list = []
+    for typ in ("https", "socks5", "http"):
+        try:
+            r = requests.get(FREEPROXY_URL, headers=ua, timeout=15,
+                             params={"type": typ, "anonymity": "", "country": "", "speed": "", "port": "", "page": 1})
+            got = _parse_freeproxy_world(r.text, _SCHEME[typ]) if r.status_code == 200 else []
+            log(f"freeproxy.world [{typ}]: {len(got)} proxies (HTTP {r.status_code})")
+            cands += got
+        except requests.RequestException as e:
+            log(f"freeproxy.world unreachable: {e}")
+            break
+    if len(cands) < 10:
+        for typ, url in FALLBACK_PROXY_LISTS:
+            try:
+                r = requests.get(url, headers=ua, timeout=15)
+                got = []
+                for m in _IPPORT.finditer(r.text):
+                    got.append(f"{_SCHEME.get((m.group(1) or typ).lower(), 'http')}://{m.group(2)}:{m.group(3)}")
+                log(f"backup list: {len(got)} proxies")
+                cands += got
+            except requests.RequestException as e:
+                log(f"backup list unreachable: {e}")
+    cands = [x for x in dict.fromkeys(cands) if x not in _PROXY_BAD]
+    random.shuffle(cands)
+    return cands[:limit]
+
+
+def _proxy_ok(px: str, timeout: float = 7.0) -> bool:
+    try:
+        r = requests.get(_PX_TEST_URL, proxies={"http": px, "https": px}, timeout=timeout)
+        return r.status_code == 200 and "colo=" in r.text
+    except Exception:
+        return False
+
+
+def refill_proxy_pool(log, want: int = 5) -> list:
+    cands = fetch_free_proxies(log)
+    if not cands:
+        return []
+    log(f"Testing {len(cands)} free proxies against Cloudflare...")
+    good: list = []
+    ex = ThreadPoolExecutor(max_workers=24)
+    futs = {ex.submit(_proxy_ok, c): c for c in cands}
+    try:
+        for fu in as_completed(futs):
+            if fu.result():
+                good.append(futs[fu])
+                if len(good) >= want:
+                    break
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    log(f"{len(good)} working proxies found.")
+    return good
+
+
+def rotate_proxy(log=None) -> bool:
+    """Drop the current proxy and switch to the next working one (fetching new ones when the pool is empty)."""
+    global AUTO_CURRENT
+    log = log or _PX_LOG
+    with _PX_LOCK:
+        cur = AUTO_CURRENT or (PANEL_PROXY if PANEL_PROXY not in _PROXY_BAD else "")
+        if cur:
+            _PROXY_BAD.add(cur)
+            log(f"Proxy failed, dropping it: {cur}")
+        AUTO_CURRENT = ""
+        if not PROXY_POOL:
+            log("Connection problem - getting free proxies from freeproxy.world ...")
+            PROXY_POOL[:] = refill_proxy_pool(log)
+        if not PROXY_POOL:
+            log("No working free proxy could be found right now.")
+            return False
+        AUTO_CURRENT = PROXY_POOL.pop(0)
+        log(f"Now using proxy: {AUTO_CURRENT}")
+        return True
+
+
+class _RotSession(requests.Session):
+    """requests.Session that, on a connection error and with the auto-proxy switch on, rotates to a working
+    free proxy and retries - so a flaky / filtered network does not stop the build."""
+
+    def __init__(self, scope: str = "panel"):
+        super().__init__()
+        self.scope = scope
+
+    def request(self, method, url, **kw):
+        t = kw.pop("timeout", 30)
+        tries = 0
+        while True:
+            px = effective_proxy(self.scope)
+            if px:
+                kw["proxies"] = {"http": px, "https": px}
+            else:
+                kw.pop("proxies", None)
+            to = t
+            if AUTO_PROXY and not isinstance(t, tuple):
+                to = (15 if px else 10, t)          # fail fast on connect, keep the read timeout
+            try:
+                return super().request(method, url, timeout=to, **kw)
+            except (requests.ConnectionError, requests.Timeout):
+                tries += 1
+                if not AUTO_PROXY or tries > 6 or not rotate_proxy():
+                    raise
+
+
 def panel_session(ua: str = "Mozilla/5.0 (AminiumStudio)") -> "requests.Session":
-    s = requests.Session()
+    s = _RotSession("panel")
     s.headers["User-Agent"] = ua
-    if PANEL_PROXY:
-        s.proxies.update({"http": PANEL_PROXY, "https": PANEL_PROXY})
     return s
 
 
 def panel_get(url: str, **kw):
-    kw.setdefault("timeout", 30)
-    if PANEL_PROXY:
-        kw.setdefault("proxies", {"http": PANEL_PROXY, "https": PANEL_PROXY})
-    return requests.get(url, **kw)
+    return panel_session().get(url, **kw)
 
 
 def check_panel_proxy(log) -> bool:
-    """Quick sanity check of the proxy (goes out through it to Cloudflare's trace endpoint)."""
     if not PANEL_PROXY:
         return True
     try:
-        r = panel_get("https://www.cloudflare.com/cdn-cgi/trace", timeout=15)
+        r = panel_get(_PX_TEST_URL, timeout=15)
         ok = r.status_code == 200 and "colo=" in r.text
     except Exception as e:
         log(f"Proxy check failed: {e}")
@@ -720,7 +870,7 @@ class CF:
     """Tiny Cloudflare API client."""
 
     def __init__(self, token: str, log, email: str = ""):
-        self.s = requests.Session()
+        self.s = _RotSession("api")
         self.global_key = bool(email)
         if email:
             self.s.headers.update({"X-Auth-Email": email, "X-Auth-Key": token})
@@ -759,6 +909,19 @@ class CF:
 
     def accounts(self):
         return self.req("GET", "/accounts?per_page=50")["result"]
+
+    def usable_accounts(self, accs: list) -> list:
+        """Keep only accounts this token can really work in (a probe call per account)."""
+        if self.global_key:
+            return accs
+        ok = []
+        for a in accs:
+            try:
+                self.req("GET", f"/accounts/{a['id']}/storage/kv/namespaces?per_page=1")
+                ok.append(a)
+            except CFError as e:
+                self.log(f"Account {a.get('name')} ({a['id'][:6]}) is not usable with this token: {str(e)[:120]}")
+        return ok or accs
 
     # ---- create a full-permission token (needs Global Key or a token with "API Tokens: Edit")
     def create_full_token(self, acc_id, name):
@@ -815,9 +978,33 @@ class CF:
             if db["name"] == name:
                 self.log(f"D1 database exists: {name}")
                 return db["uuid"]
-        db = self.req("POST", f"/accounts/{acc}/d1/database", json={"name": name})["result"]
+        try:
+            db = self.req("POST", f"/accounts/{acc}/d1/database", json={"name": name})["result"]
+        except CFError as e:
+            if re.search(r"limit|maximum|exceed|too many|quota|max", str(e), re.I):
+                raise CFError("Cloudflare says this account reached its D1 database limit. Open Saved > Databases, "
+                              "delete the ones you do not need, then press Build again.  (" + str(e)[:160] + ")")
+            raise
         self.log(f"D1 database created: {name}")
         return db["uuid"]
+
+    def d1_list(self, acc):
+        out, page = [], 1
+        while page < 20:
+            res = self.req("GET", f"/accounts/{acc}/d1/database?per_page=100&page={page}")["result"]
+            out += res
+            if len(res) < 100:
+                break
+            page += 1
+        return out
+
+    def d1_delete(self, acc, uuid):
+        self.req("DELETE", f"/accounts/{acc}/d1/database/{uuid}")
+        self.log(f"D1 database deleted: {uuid}")
+
+    def kv_delete(self, acc, ns_id):
+        self.req("DELETE", f"/accounts/{acc}/storage/kv/namespaces/{ns_id}")
+        self.log(f"KV namespace deleted: {ns_id}")
 
     # ---- Pages
     def pages_project(self, acc, name):
@@ -1395,11 +1582,16 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
     """Runs the whole deploy pipeline (same steps/order as the desktop app) and returns
     {"rec": rec, "out": out}. Raises CFError / Exception on failure; `log(str)` and
     `stage(text, fraction)` are called for progress, exactly like the desktop version."""
+    set_proxy_logger(log)
+    if f.get("auto_proxy") is not None:
+        set_auto_proxy(f.get("auto_proxy"))
     if f.get("proxy") is not None:
         set_panel_proxy(f.get("proxy"))
     if PANEL_PROXY:
         log("Panel requests (login / users / configs) will use the temporary proxy.")
         check_panel_proxy(log)
+    if AUTO_PROXY:
+        log("Auto proxy is ON: on a connection error, free proxies are fetched and rotated automatically.")
     cf = CF(token, log, email)
     stage("Checking your token...", 0.04)
     cf.verify()
@@ -1408,6 +1600,7 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
     acc = selected_account_id(accounts, account_id)
     if not acc:
         raise CFError("No Cloudflare account found for this token")
+    log("Using account: " + next((f"{a.get('name')} ({a['id'][:6]})" for a in accounts if a["id"] == acc), acc))
     files = load_source(source)
     log(f"Files: {', '.join(files)}  ({sum(len(v) for v in files.values()) // 1024} KB)")
     if not cf.global_key:
@@ -1621,8 +1814,79 @@ def delete_deployment(items: list, index: int, token: str = "", email: str = "",
             else:
                 cf.pages_delete(rec["account"], rec["project"])
             log(f"Removed {rec['project']} from Cloudflare too.")
+            if rec.get("d1_id"):
+                try:
+                    cf.d1_delete(rec["account"], rec["d1_id"])
+                except Exception as e:
+                    log(f"Could not delete its D1 database ({e}).")
+            if rec.get("kv_id"):
+                try:
+                    cf.kv_delete(rec["account"], rec["kv_id"])
+                except Exception as e:
+                    log(f"Could not delete its KV namespace ({e}).")
         except Exception as e:
             log(f"Could not remove the remote project ({e}); removed from this list only.")
     items.pop(index)
     save_deployments(items)
     return items
+
+
+def update_deployment_ips(rec: dict, pool: list, scan_form: dict, log, stage=lambda *_: None, keep: int = 100) -> dict:
+    """Re-test `pool` against the saved worker and write the working IPs into its panel.
+    Leaves the panel untouched if none of them works from this network."""
+    pool = list(dict.fromkeys(pool))
+    if not pool:
+        raise CFError("No IPs to test - run the Radar first, or the saved list is empty.")
+    base, panel_path, password = rec["base"], rec.get("panel_path") or "/panel", rec["password"]
+    host, tls = host_of(base), rec.get("tls", True)
+    ws_path = rec.get("ws_path") or "/"
+    if rec.get("sub"):
+        try:
+            r0 = panel_get(rec["sub"] + "?format=base64", timeout=30, headers={"User-Agent": "AminiumStudio"})
+            for ln in links_from_base64(r0.text):
+                mt = re.search(r"[?&]path=([^&#]+)", ln)
+                if mt:
+                    ws_path = unquote(mt.group(1))
+                    break
+        except Exception as e:
+            log(f"Could not read the signed path ({e}); using the plain WS path.")
+    modes = [(True, "with TLS fragment"), (False, "without fragment")] if tls else [(False, "")]
+    scores: dict = {}
+    for n, (frag, label) in enumerate(modes):
+        stage(f"Testing {len(pool)} IPs {label}...".replace("  ", " "), 0.2 + 0.3 * n)
+        d = dict(scan_form)
+        d.update(host=host, ws=True, ws_path=ws_path, custom="\n".join(pool), count=len(pool), target=0, neighbors=False,
+                 auto=False, speed=False, rounds=2, port=443 if tls else 80, fragment=frag)
+        job = ScanJob(Config.from_dict(d), log)
+        job.diag_on_empty = False
+        job.run()
+        rows = [r for r in job.snapshot()["results"] if r["ws"]]
+        log(f"{len(rows)} of {len(pool)} IPs reach the worker {label}.".replace("  ", " "))
+        for r in rows:
+            scores[r["ip"]] = max(scores.get(r["ip"], 0), r["score"] + (1 if frag else 0))
+    good = [ip for ip, _ in sorted(scores.items(), key=lambda kv: -kv[1])][:keep]
+    if not good:
+        raise CFError("None of these IPs reaches your worker from this network - the panel was left unchanged.")
+    stage("Writing the new IPs into the panel...", 0.8)
+    extra = dict(PANEL_STYLE)
+    extra.update(tls=tls, fingerprint=rec.get("fp", "chrome"))
+    panel_apply_clean(base, panel_path, password, [host] + good, log, extra=extra)
+    rec["ips"] = good
+    rec["updated"] = time.strftime("%Y-%m-%d %H:%M")
+    return rec
+
+
+def replace_deployment(index: int, rec: dict) -> list:
+    items = load_deployments()
+    if 0 <= index < len(items):
+        items[index] = rec
+        save_deployments(items)
+    return items
+
+
+def forget_d1(uuid: str) -> None:
+    items = load_deployments()
+    for r in items:
+        if r.get("d1_id") == uuid:
+            r["d1_id"] = None
+    save_deployments(items)
