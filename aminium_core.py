@@ -676,6 +676,8 @@ PANEL_PROXY = ""          # manual
 AUTO_PROXY = False        # master switch for the automatic fallback
 AUTO_CURRENT = ""         # proxy currently picked by the automatic fallback
 PROXY_POOL: list = []
+VPN_PROMPT = None         # set by the UI: called when the connection fails and smart connection is OFF; returns True to retry
+_VPN_LOCK = threading.Lock()
 _PROXY_BAD: set = set()
 _PX_LOCK = threading.RLock()
 _PX_LOG = print
@@ -886,7 +888,14 @@ class _RotSession(requests.Session):
                 return r
             except (requests.ConnectionError, requests.Timeout):
                 tries += 1
-                if not AUTO_PROXY or tries > 6:
+                if not AUTO_PROXY:
+                    if VPN_PROMPT is not None and tries <= 3:
+                        with _VPN_LOCK:
+                            again = bool(VPN_PROMPT(url))
+                        if again:
+                            continue
+                    raise
+                if tries > 6:
                     raise
                 if px and px == AUTO_CURRENT:
                     _PX_FAILS[px] = _PX_FAILS.get(px, 0) + 1
@@ -1576,23 +1585,23 @@ def host_of(url: str) -> str:
 # ════════════════════════════════════════════════════════════════════════════
 FORMATS = [  # key, button label, query, file name (None = no file, link only)
     ("auto", "Auto (recommended)", "", None),
-    ("xray", "Xray + fragment", "?format=xray", "xray.json"),
+    ("xray", "Xray", "?format=xray", "xray.json"),
     ("clash", "Clash", "?format=clash", "clash.yaml"),
     ("singbox", "sing-box", "?format=singbox", "singbox.json"),
     ("patt", "Patt", "?format=patt", "patt.txt"),
     ("v2ray", "Plain links", "?format=base64", "sub_v2ray.txt"),
 ]
-RAW = "Raw links (no fragment)"
+RAW = "Raw links"
 AUTO_NOTE = ("This is the plain subscription link of your panel. Paste it into v2rayN, v2rayNG, Hiddify, Clash, sing-box ... "
-             "and the panel sends each app the format that suits it (Xray apps get the list WITH TLS fragment).")
+             "and the panel sends each app the format that suits it ")
 FORMAT_HELP = {
     "auto": "Best choice. Same kind of link the plain deployer gives you: every app receives the right format by itself.",
-    "xray": "For Xray-core apps (v2rayN, v2rayNG...). Includes TLS fragment - the reason many configs connect on filtered networks.",
+    "xray": "For Xray-core apps (v2rayN, v2rayNG...).",
     "clash": "For Clash / Mihomo / Stash.",
     "singbox": "For sing-box / Hiddify / Karing.",
     "patt": "For PattNG-style clients (extra TLS disguise).",
-    "v2ray": "Plain share links WITHOUT fragment. On filtered networks they often do not connect even though the Auto link works.",
-    RAW: "Single share links WITHOUT fragment. If they show no ping, use the Auto or Xray link instead.",
+    "v2ray": "Plain share links.",
+    RAW: "Single share links.",
 }
 
 
@@ -1825,7 +1834,7 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
                     break
         except Exception as e:
             log(f"Could not read a signed path ({e}); using the plain WS path.")
-        modes = [(True, "with TLS fragment"), (False, "without fragment")] if f["tls"] else [(False, "")]
+        modes = [(False, "")]
         scores: dict = {}
         for n, (frag, label) in enumerate(modes):
             stage(f"Testing {len(pool)} IPs on your worker {label}...".replace("  ", " "), 0.58 + 0.12 * n)
@@ -1844,7 +1853,7 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
         good = pool[:keep_n]
     warned = bool(f["verify_ws"] and pool and not good)
     if warned:
-        log(f"WARNING: no clean IP could reach your worker from this network (even with TLS fragment). The configs will use "
+        log(f"WARNING: no clean IP could reach your worker from this network . The configs will use "
             f"your worker's own address ({host}), exactly like the plain deployer. If those do not connect either, this "
             "network blocks that domain: deploy to Workers instead of Pages, or attach your own domain (Advanced > Custom domain).")
         stage("No clean IP works with this worker here - configs use its own address.", 0.75)
@@ -1970,7 +1979,7 @@ def update_deployment_ips(rec: dict, pool: list, scan_form: dict, log, stage=lam
                     break
         except Exception as e:
             log(f"Could not read the signed path ({e}); using the plain WS path.")
-    modes = [(True, "with TLS fragment"), (False, "without fragment")] if tls else [(False, "")]
+    modes = [(False, "")]
     scores: dict = {}
     for n, (frag, label) in enumerate(modes):
         stage(f"Testing {len(pool)} IPs {label}...".replace("  ", " "), 0.2 + 0.3 * n)
