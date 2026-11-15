@@ -774,11 +774,35 @@ def _proxy_ok(px: str, timeout: float = 7.0) -> bool:
         return False
 
 
-def refill_proxy_pool(log, want: int = 5) -> list:
-    cands = fetch_free_proxies(log)
-    if not cands:
+PROXY_CACHE_FILE = APP_DIR / "aminium_proxy_cache.json"
+_PX_FAILS: dict = {}
+_PX_SEEN: set = set()
+
+
+def _cache_load() -> list:
+    try:
+        return [x for x in json.loads(PROXY_CACHE_FILE.read_text(encoding="utf-8")) if isinstance(x, str)][:30]
+    except Exception:
         return []
-    log(f"Testing {len(cands)} free proxies against Cloudflare...")
+
+
+def _cache_save(items: list) -> None:
+    try:
+        PROXY_CACHE_FILE.write_text(json.dumps(items[:30]), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _note_good(px: str) -> None:
+    """A proxy just carried a real request: remember it (also across app restarts) and reset its failure count."""
+    _PX_FAILS[px] = 0
+    if px not in _PX_SEEN:
+        _PX_SEEN.add(px)
+        items = [x for x in _cache_load() if x != px]
+        _cache_save([px] + items)
+
+
+def _pick_working(cands: list, want: int, log) -> list:
     good: list = []
     ex = ThreadPoolExecutor(max_workers=24)
     futs = {ex.submit(_proxy_ok, c): c for c in cands}
@@ -790,7 +814,24 @@ def refill_proxy_pool(log, want: int = 5) -> list:
                     break
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
-    log(f"{len(good)} working proxies found.")
+    return good
+
+
+def refill_proxy_pool(log, want: int = 5) -> list:
+    # 1) proxies that worked before (this session or an earlier one) - checked first, they are the most likely to work
+    cached = [p for p in _cache_load() if p not in _PROXY_BAD]
+    good: list = []
+    if cached:
+        log(f"Re-checking {len(cached)} proxies that worked before...")
+        good = _pick_working(cached, want, log)
+        log(f"{len(good)} of them still work.")
+    # 2) fresh ones from freeproxy.world (+ backup lists)
+    if len(good) < want:
+        cands = [x for x in fetch_free_proxies(log) if x not in good]
+        if cands:
+            log(f"Testing {len(cands)} free proxies against Cloudflare...")
+            good += _pick_working(cands, want - len(good), log)
+    log(f"{len(good)} working proxies ready.")
     return good
 
 
@@ -802,22 +843,25 @@ def rotate_proxy(log=None) -> bool:
         cur = AUTO_CURRENT or (PANEL_PROXY if PANEL_PROXY not in _PROXY_BAD else "")
         if cur:
             _PROXY_BAD.add(cur)
+            _cache_save([x for x in _cache_load() if x != cur])
             log(f"Proxy failed, dropping it: {cur}")
         AUTO_CURRENT = ""
         if not PROXY_POOL:
-            log("Connection problem - getting free proxies from freeproxy.world ...")
+            log("Connection problem - looking for a working proxy...")
             PROXY_POOL[:] = refill_proxy_pool(log)
         if not PROXY_POOL:
-            log("No working free proxy could be found right now.")
+            log("No working proxy could be found right now.")
             return False
         AUTO_CURRENT = PROXY_POOL.pop(0)
-        log(f"Now using proxy: {AUTO_CURRENT}")
+        _PX_FAILS[AUTO_CURRENT] = 0
+        log(f"Now using proxy: {AUTO_CURRENT}  (it will be reused for every request until it fails)")
         return True
 
 
 class _RotSession(requests.Session):
     """requests.Session that, on a connection error and with the auto-proxy switch on, rotates to a working
-    free proxy and retries - so a flaky / filtered network does not stop the build."""
+    proxy and retries. A proxy that works is kept and used for EVERYTHING (Cloudflare API, panel, configs)
+    until it fails twice in a row - then the next one takes over."""
 
     def __init__(self, scope: str = "panel"):
         super().__init__()
@@ -836,10 +880,19 @@ class _RotSession(requests.Session):
             if AUTO_PROXY and not isinstance(t, tuple):
                 to = (15 if px else 10, t)          # fail fast on connect, keep the read timeout
             try:
-                return super().request(method, url, timeout=to, **kw)
+                r = super().request(method, url, timeout=to, **kw)
+                if px and px == AUTO_CURRENT:
+                    _note_good(px)
+                return r
             except (requests.ConnectionError, requests.Timeout):
                 tries += 1
-                if not AUTO_PROXY or tries > 6 or not rotate_proxy():
+                if not AUTO_PROXY or tries > 6:
+                    raise
+                if px and px == AUTO_CURRENT:
+                    _PX_FAILS[px] = _PX_FAILS.get(px, 0) + 1
+                    if _PX_FAILS[px] < 2:
+                        continue                     # one more chance for a proxy that worked a moment ago
+                if not rotate_proxy():
                     raise
 
 
@@ -1455,6 +1508,65 @@ def panel_set(base: str, panel: str, password: str, settings: dict, log):
         raise CFError(f"Panel refused the settings (HTTP {r.status_code}): {r.text[:200]}")
 
 
+# ---- per-network profiles: the panel picks a profile by the ASN of whoever fetches the subscription, so ONE
+# subscription can carry different clean IPs / fragment values for MCI, Irancell, Rightel and home internet.
+NET_PRESETS = {
+    "mci": {"label": "MCI (Hamrah-e-Avval)", "name": "MCI", "asns": [197207], "plmn": "43211",
+            "fragment": {"length": "10-30", "interval": "1-2"}},
+    "irancell": {"label": "Irancell", "name": "Irancell", "asns": [44244], "plmn": "43235",
+                 "fragment": {"length": "10-30", "interval": "1-2"}},
+    "rightel": {"label": "Rightel", "name": "Rightel", "asns": [57218], "plmn": "43220",
+                "fragment": {"length": "10-30", "interval": "1-2"}},
+    "home": {"label": "Home internet (ADSL / Fiber)", "name": "Home",
+             "asns": [58224, 12880, 31549, 16322, 43754, 44889, 50810, 48159, 42337, 25184],
+             "fragment": {"length": "100-200", "interval": "1-1"}},
+}
+_DEFAULT_PROFILES = [
+    {"name": "MCI", "asns": [197207], "cleanAddrs": [], "ports": [], "fragment": None},
+    {"name": "Irancell", "asns": [44244], "cleanAddrs": [], "ports": [], "fragment": None},
+    {"name": "Rightel", "asns": [57218], "cleanAddrs": [], "ports": [], "fragment": None},
+    {"name": "Shatel", "asns": [31549], "cleanAddrs": [], "ports": [], "fragment": None},
+    {"name": "TCI", "asns": [58224, 12880], "cleanAddrs": [], "ports": [], "fragment": None},
+]
+
+
+def valid_frag(length: str, interval: str):
+    rng = re.compile(r"^\d{1,4}-\d{1,4}$")
+    if rng.match(length or "") and rng.match(interval or ""):
+        return {"length": length, "interval": interval}
+    return None
+
+
+def panel_apply_profile(base: str, panel: str, password: str, key: str, ips: list, log, frag: dict | None = None):
+    """Write the verified IPs of the network you are on now into that network's profile on the panel."""
+    p = NET_PRESETS.get(key)
+    if not p or not ips:
+        return
+    s, api = panel_login(base, panel, password, log)
+    state = s.get(api + "/state", timeout=20).json()
+    cur = (state.get("settings") or {}).get("ispProfiles")
+    if not isinstance(cur, list):
+        cur = [dict(x) for x in _DEFAULT_PROFILES]
+    out = []
+    for pr in cur:
+        nm = str(pr.get("name", ""))
+        if nm.lower() == p["name"].lower():
+            continue
+        if key == "home" and nm in ("TCI", "Shatel") and not pr.get("cleanAddrs"):
+            continue                                   # replaced by the broader "Home" profile
+        pr = dict(pr)
+        pr["asns"] = [a for a in (pr.get("asns") or []) if a not in p["asns"]]
+        if pr["asns"]:
+            out.append(pr)
+    out.append({"name": p["name"], "asns": list(p["asns"]), "cleanAddrs": [host_of(base)] + list(ips), "ports": [],
+                "fragment": frag or p["fragment"]})
+    r = s.post(api + "/settings", json={"ispProfiles": out}, timeout=30)
+    if r.status_code != 200:
+        raise CFError(f"Panel refused the network profile (HTTP {r.status_code}): {r.text[:200]}")
+    fr = frag or p["fragment"]
+    log(f"Network profile '{p['name']}' saved: {len(ips)} IPs, fragment {fr['length']} / {fr['interval']}.")
+
+
 def host_of(url: str) -> str:
     return urlparse(url).hostname or ""
 
@@ -1742,12 +1854,19 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
     extra.update(tls=f["tls"], fingerprint="chrome")
     panel_apply_clean(base, panel_path, f["pass"], addrs, log, extra=extra)
     ips = good
+    net = f.get("net")
+    if net in NET_PRESETS and ips:
+        try:
+            panel_apply_profile(base, panel_path, f["pass"], net, ips, log,
+                                frag=valid_frag(f.get("frag_len", ""), f.get("frag_int", "")))
+        except Exception as e:
+            log(f"Network profile not saved ({e}); the default list still works for every network.")
 
     stage("Generating configs...", 0.92)
     out = fetch_configs(sub_link, log)
     rec = {"project": project, "mode": mode, "account": acc, "base": base, "panel_path": panel_path, "password": f["pass"],
            "sub": sub_link, "ws_path": f["ws_path"], "kv_id": kv_id, "d1_id": d1_id, "ips": ips, "tls": f["tls"],
-           "fp": "chrome", "created": time.strftime("%Y-%m-%d %H:%M")}
+           "fp": "chrome", "net": f.get("net") or "", "created": time.strftime("%Y-%m-%d %H:%M")}
     text = (f"Aminium deployed ({status})\nSite:        {base}\nPanel:       {base}{panel_path}\nPassword:    {f['pass']}\n"
             f"Sub link:    {sub_link}\nCron URL:    {cron_url or ('(native cron, every 15 min)' if mode == 'workers' else '-')}\n"
             f"Clean IPs:   {len(ips)}\nConfig links: {len(out['links'])}\nKV id:       {kv_id}\nD1 id:       {d1_id or '-'}\n")
@@ -1831,7 +1950,8 @@ def delete_deployment(items: list, index: int, token: str = "", email: str = "",
     return items
 
 
-def update_deployment_ips(rec: dict, pool: list, scan_form: dict, log, stage=lambda *_: None, keep: int = 100) -> dict:
+def update_deployment_ips(rec: dict, pool: list, scan_form: dict, log, stage=lambda *_: None, keep: int = 100,
+                          net: str = "", frag: dict | None = None) -> dict:
     """Re-test `pool` against the saved worker and write the working IPs into its panel.
     Leaves the panel untouched if none of them works from this network."""
     pool = list(dict.fromkeys(pool))
@@ -1871,6 +1991,9 @@ def update_deployment_ips(rec: dict, pool: list, scan_form: dict, log, stage=lam
     extra = dict(PANEL_STYLE)
     extra.update(tls=tls, fingerprint=rec.get("fp", "chrome"))
     panel_apply_clean(base, panel_path, password, [host] + good, log, extra=extra)
+    if net in NET_PRESETS:
+        panel_apply_profile(base, panel_path, password, net, good, log, frag=frag)
+        rec["net"] = net
     rec["ips"] = good
     rec["updated"] = time.strftime("%Y-%m-%d %H:%M")
     return rec
