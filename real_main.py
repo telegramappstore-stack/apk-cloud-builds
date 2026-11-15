@@ -718,6 +718,10 @@ FloatLayout:
                     text: "Custom domain (optional)"
                 RoundInput:
                     id: f_domain
+                FieldLabel:
+                    text: "Temporary proxy for the panel (optional)  e.g. 1.2.3.4:8080 or socks5://1.2.3.4:1080"
+                RoundInput:
+                    id: f_proxy
                 RoundButton:
                     text: "Re-roll random values"
                     kind: "soft"
@@ -1277,6 +1281,7 @@ class AminiumApp(App):
         if self.token:
             self.set_status(t.ids.lbl_token_state, "Token loaded from this phone. Press 'Save & verify'.")
         self.roll_all()
+        self.sm.get_screen("build").ids.f_proxy.text = self.cfg.get("panel_proxy", "")
 
     # ---------- step 1: token ----------
     def open_token_page(self, manual=False):
@@ -1587,7 +1592,10 @@ class AminiumApp(App):
             "pass": b.ids.f_pass.text, "ws_path": self._ws_path, "cron": self._cron, "uuid": self._uuid,
             "decoy": "", "tg_token": "", "tg_secret": "", "tg_admins": "", "domain": b.ids.f_domain.text.strip().lower(),
             "d1": True, "verify_ws": True, "scan": self.scan_form(), "ips": list(self.ips), "keep": 100, "tls": tls,
+            "proxy": b.ids.f_proxy.text.strip(),
         }
+        self.cfg["panel_proxy"] = form["proxy"]
+        self.save_cfg()
         b.ids.btn_build.disabled = True
         b.ids.btn_build.text = "Building..."
         b.ids.ring.value = 0
