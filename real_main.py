@@ -1,697 +1,907 @@
+#!/usr/bin/env python3
 """
-Aether / WARP - Kivy / Android port of aether_tool2.py
+Aminium Studio - Kivy / Android port.
 
-Tabs: Connect, WARP Account, aether:// Link, Endpoint Scan, Settings.
+Same four steps as the desktop app (Token -> Clean IPs -> Build -> Configs), plus the ONE
+feature this version adds: a "My configs" screen to manage every config ever built on this
+device (rename, delete locally, optionally also delete the Worker/Pages project on Cloudflare).
 
-Real tunnel on Android:
-  usque (bundled as libusque.so, started as a subprocess) listens as a
-  local SOCKS5 proxy -> VpnTunnelService (Java VpnService, see
-  android_src/) establishes a system-wide TUN device and hands it to
-  tun2socks (bundled as libtun2socks.so) which forwards every packet into
-  that SOCKS5 proxy. That TUN device is what makes Android show the VPN
-  "key" icon in the status bar, and it's what actually routes ALL apps'
-  traffic, not just this app's.
-
-  On desktop (no android/jnius available) the VPN step is skipped
-  automatically and only the local SOCKS5 proxy runs -- useful for
-  testing the rest of the app without a phone.
+All networking / scanning / Cloudflare / config-generation logic is unchanged from the desktop
+app - it lives in aminium_core.py and is simply called from here. This file only replaces the
+customtkinter UI with a Kivy UI that works on a phone.
 """
 import json
-import os
+import re
 import threading
 import time
+import uuid as uuidlib
 
 from kivy.app import App
-from kivy.clock import Clock, mainthread
+from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.lang import Builder
-from kivy.properties import StringProperty, BooleanProperty, NumericProperty
+from kivy.properties import StringProperty, NumericProperty, BooleanProperty, ListProperty
+from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.popup import Popup
-from kivy.uix.label import Label
+from kivy.utils import platform
 
-import warpcore as core
-import android_bridge as bridge
+import aminium_core as core
 
-Window.clearcolor = (0x07 / 255, 0x0a / 255, 0x13 / 255, 1)
+# ───────────────────────────── Android runtime permissions ─────────────────────────────
+if platform == "android":
+    try:
+        from android.permissions import request_permissions, Permission  # type: ignore
+        request_permissions([Permission.INTERNET, Permission.ACCESS_NETWORK_STATE])
+    except Exception:
+        pass
 
-KV = """
-#:import utils kivy.utils
-
-<Pill@Label>:
-    color: 0.92, 0.94, 0.98, 1
-    font_size: '13sp'
-
-<SectionLabel@Label>:
-    color: 0.55, 0.6, 0.78, 1
-    font_size: '11sp'
-    size_hint_y: None
-    height: '20dp'
-    halign: 'left'
-    valign: 'middle'
-    text_size: self.size
-
-<Field@BoxLayout>:
-    orientation: 'vertical'
-    size_hint_y: None
-    height: '56dp'
-    label: ''
-    hint: ''
-    text: ''
-    password: False
-    SectionLabel:
-        text: root.label
-    TextInput:
-        id: ti
-        text: root.text
-        hint_text: root.hint
-        multiline: False
-        password: root.password
-        background_color: 0.04, 0.07, 0.13, 1
-        foreground_color: 0.92, 0.94, 0.98, 1
-        cursor_color: 0.13, 0.83, 0.93, 1
-        padding: '10dp', '10dp'
-        on_text: root.text = self.text
-
-<BigButton@Button>:
-    background_normal: ''
-    background_down: ''
-    background_color: 0.19, 0.35, 0.65, 1
-    color: 1, 1, 1, 1
-    bold: True
-    size_hint_y: None
-    height: '48dp'
-
-<GhostButton@Button>:
-    background_normal: ''
-    background_down: ''
-    background_color: 0.09, 0.13, 0.22, 1
-    color: 0.85, 0.88, 0.95, 1
-    size_hint_y: None
-    height: '40dp'
+KV = r"""
+#:import dp kivy.metrics.dp
 
 <Card@BoxLayout>:
-    orientation: 'vertical'
-    padding: '14dp'
-    spacing: '8dp'
+    orientation: "vertical"
+    padding: dp(14)
+    spacing: dp(8)
     size_hint_y: None
     height: self.minimum_height
     canvas.before:
         Color:
-            rgba: 0.06, 0.09, 0.16, 1
+            rgba: 0.071, 0.102, 0.212, 1
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [14,]
-        Color:
-            rgba: 0.11, 0.16, 0.27, 1
-        Line:
-            rounded_rectangle: self.x, self.y, self.width, self.height, 14
-            width: 1
+            radius: [dp(14)]
 
-RootWidget:
-    orientation: 'vertical'
+<SectionLabel@Label>:
+    bold: True
+    font_size: "16sp"
+    size_hint_y: None
+    height: self.texture_size[1]
+    halign: "left"
+    valign: "middle"
+    text_size: self.width, None
+    color: 0.91, 0.925, 1, 1
+
+<SubLabel@Label>:
+    font_size: "12sp"
+    size_hint_y: None
+    height: self.texture_size[1]
+    halign: "left"
+    valign: "middle"
+    text_size: self.width, None
+    color: 0.56, 0.61, 0.78, 1
+
+<FieldLabel@Label>:
+    font_size: "13sp"
+    size_hint_y: None
+    height: dp(24)
+    halign: "left"
+    valign: "middle"
+    text_size: self.width, None
+    color: 0.72, 0.76, 0.9, 1
+
+<StepHeader@BoxLayout>:
+    size_hint_y: None
+    height: dp(56)
+    canvas.before:
+        Color:
+            rgba: 0.106, 0.157, 0.42, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    Label:
+        text: root.title if hasattr(root, "title") else ""
+        bold: True
+        font_size: "18sp"
+
+BoxLayout:
+    orientation: "vertical"
+    canvas.before:
+        Color:
+            rgba: 0.039, 0.055, 0.122, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
 
     BoxLayout:
         size_hint_y: None
-        height: '46dp'
-        padding: '12dp', '6dp'
+        height: dp(52)
+        padding: dp(10), 0
         canvas.before:
             Color:
-                rgba: 0.04, 0.06, 0.11, 1
+                rgba: 0.106, 0.157, 0.42, 1
             Rectangle:
                 pos: self.pos
                 size: self.size
         Label:
-            text: 'Aether  ·  WARP / MASQUE'
+            text: "AMINIUM STUDIO"
             bold: True
-            color: 0.9, 0.93, 0.98, 1
-            halign: 'left'
+            font_size: "18sp"
+            halign: "left"
             text_size: self.size
 
-    TabbedPanel:
-        id: tabs
-        do_default_tab: False
-        tab_width: self.width / 5
-        background_color: 0.03, 0.05, 0.09, 1
+    BoxLayout:
+        id: tabbar
+        size_hint_y: None
+        height: dp(44)
+        canvas.before:
+            Color:
+                rgba: 0.071, 0.102, 0.212, 1
+            Rectangle:
+                pos: self.pos
+                size: self.size
+        ToggleButton:
+            text: "1 Token"
+            group: "tabs"
+            state: "down"
+            on_press: app.goto("token")
+        ToggleButton:
+            text: "2 Clean IPs"
+            group: "tabs"
+            on_press: app.goto("scan")
+        ToggleButton:
+            text: "3 Build"
+            group: "tabs"
+            on_press: app.goto("build")
+        ToggleButton:
+            text: "4 Configs"
+            group: "tabs"
+            on_press: app.goto("output")
+        ToggleButton:
+            text: "My configs"
+            group: "tabs"
+            on_press: app.goto("manage")
 
-        TabbedPanelItem:
-            text: 'Connect'
-            ScrollView:
-                BoxLayout:
-                    id: connect_root
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: self.minimum_height
-                    padding: '14dp'
-                    spacing: '12dp'
+    ScreenManager:
+        id: sm
 
-        TabbedPanelItem:
-            text: 'Account'
-            ScrollView:
-                BoxLayout:
-                    id: account_root
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: self.minimum_height
-                    padding: '14dp'
-                    spacing: '12dp'
+    BoxLayout:
+        id: logbar
+        size_hint_y: None
+        height: dp(72)
+        padding: dp(8)
+        canvas.before:
+            Color:
+                rgba: 0.027, 0.039, 0.086, 1
+            Rectangle:
+                pos: self.pos
+                size: self.size
+        ScrollView:
+            Label:
+                id: logbox
+                text: ""
+                size_hint_y: None
+                height: self.texture_size[1]
+                text_size: self.width, None
+                font_size: "11sp"
+                color: 0.56, 0.61, 0.78, 1
 
-        TabbedPanelItem:
-            text: 'Link'
-            ScrollView:
-                BoxLayout:
-                    id: link_root
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: self.minimum_height
-                    padding: '14dp'
-                    spacing: '12dp'
 
-        TabbedPanelItem:
-            text: 'Scan'
-            ScrollView:
-                BoxLayout:
-                    id: scan_root
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: self.minimum_height
-                    padding: '14dp'
-                    spacing: '12dp'
+<TokenScreen>:
+    name: "token"
+    ScrollView:
+        BoxLayout:
+            orientation: "vertical"
+            padding: dp(12)
+            spacing: dp(10)
+            size_hint_y: None
+            height: self.minimum_height
 
-        TabbedPanelItem:
-            text: 'Settings'
-            ScrollView:
-                BoxLayout:
-                    id: settings_root
-                    orientation: 'vertical'
+            Card:
+                SectionLabel:
+                    text: "Step 1 - Cloudflare API token"
+                SubLabel:
+                    text: "Paste your Cloudflare API token once. It is stored only on this phone (app-private storage)."
+                FieldLabel:
+                    text: "API token (or Global API Key)"
+                TextInput:
+                    id: f_token
+                    multiline: False
+                    password: True
                     size_hint_y: None
-                    height: self.minimum_height
-                    padding: '14dp'
-                    spacing: '12dp'
+                    height: dp(44)
+                FieldLabel:
+                    text: "Email (only needed for a Global API Key)"
+                TextInput:
+                    id: f_email
+                    multiline: False
+                    size_hint_y: None
+                    height: dp(44)
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(8)
+                    Button:
+                        text: "Save && verify"
+                        on_release: app.on_save_token()
+                    Button:
+                        text: "Forget token"
+                        on_release: app.on_forget_token()
+                Label:
+                    id: lbl_token_state
+                    text: ""
+                    size_hint_y: None
+                    height: dp(22)
+                    text_size: self.width, None
+                FieldLabel:
+                    text: "Account"
+                Spinner:
+                    id: sp_account
+                    text: "(verify token first)"
+                    size_hint_y: None
+                    height: dp(44)
+
+
+<ScanScreen>:
+    name: "scan"
+    ScrollView:
+        BoxLayout:
+            orientation: "vertical"
+            padding: dp(12)
+            spacing: dp(10)
+            size_hint_y: None
+            height: self.minimum_height
+
+            Card:
+                SectionLabel:
+                    text: "Step 2 - find clean Cloudflare IPs"
+                SubLabel:
+                    text: "Run this with any VPN off. Each IP gets a real TCP + TLS + HTTP test."
+                FieldLabel:
+                    text: "Connection"
+                Spinner:
+                    id: sp_conn
+                    text: "TLS"
+                    values: ["TLS", "No TLS"]
+                    size_hint_y: None
+                    height: dp(44)
+                FieldLabel:
+                    text: "Search depth"
+                Spinner:
+                    id: sp_depth
+                    text: "Normal"
+                    values: ["Quick", "Normal", "Deep"]
+                    size_hint_y: None
+                    height: dp(44)
+                Button:
+                    id: btn_scan
+                    text: "\u25b6  Start scan"
+                    size_hint_y: None
+                    height: dp(48)
+                    on_release: app.on_scan()
+                Button:
+                    id: btn_stop
+                    text: "Stop"
+                    size_hint_y: None
+                    height: dp(40)
+                    disabled: True
+                    on_release: app.on_stop_scan()
+                Label:
+                    id: lbl_scan_stats
+                    text: "idle"
+                    size_hint_y: None
+                    height: dp(24)
+                ProgressBar:
+                    id: pb_scan
+                    max: 1
+                    value: 0
+                    size_hint_y: None
+                    height: dp(16)
+
+            Card:
+                SectionLabel:
+                    text: "Clean IPs found"
+                Label:
+                    id: lbl_ip_list
+                    text: "(none yet)"
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    font_size: "12sp"
+
+
+<BuildScreen>:
+    name: "build"
+    ScrollView:
+        BoxLayout:
+            orientation: "vertical"
+            padding: dp(12)
+            spacing: dp(10)
+            size_hint_y: None
+            height: self.minimum_height
+
+            Card:
+                SectionLabel:
+                    text: "Step 3 - build"
+                Label:
+                    id: lbl_build_sum
+                    text: ""
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                FieldLabel:
+                    text: "Deploy to"
+                Spinner:
+                    id: sp_mode
+                    text: "Workers (recommended)"
+                    values: ["Workers (recommended)", "Pages (pages.dev)"]
+                    size_hint_y: None
+                    height: dp(44)
+                FieldLabel:
+                    text: "Source (_worker.js zip, e.g. aminium-pages.zip)"
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(6)
+                    TextInput:
+                        id: f_source
+                        multiline: False
+                    Button:
+                        text: "Pick"
+                        size_hint_x: None
+                        width: dp(70)
+                        on_release: app.pick_source_file()
+                FieldLabel:
+                    text: "Project name"
+                TextInput:
+                    id: f_project
+                    multiline: False
+                    size_hint_y: None
+                    height: dp(44)
+                FieldLabel:
+                    text: "ADMIN_PASSWORD"
+                TextInput:
+                    id: f_pass
+                    multiline: False
+                    size_hint_y: None
+                    height: dp(44)
+                FieldLabel:
+                    text: "PANEL_PATH"
+                TextInput:
+                    id: f_panel
+                    multiline: False
+                    size_hint_y: None
+                    height: dp(44)
+                FieldLabel:
+                    text: "Custom domain (optional)"
+                TextInput:
+                    id: f_domain
+                    multiline: False
+                    size_hint_y: None
+                    height: dp(44)
+                Button:
+                    text: "Re-roll random values"
+                    size_hint_y: None
+                    height: dp(40)
+                    on_release: app.roll_all()
+                Button:
+                    id: btn_build
+                    text: "\u26a1  Build my configs"
+                    size_hint_y: None
+                    height: dp(52)
+                    on_release: app.on_build()
+                Label:
+                    id: lbl_build_stage
+                    text: "Waiting for you."
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                ProgressBar:
+                    id: pb_build
+                    max: 1
+                    value: 0
+                    size_hint_y: None
+                    height: dp(16)
+
+
+<OutputScreen>:
+    name: "output"
+    ScrollView:
+        BoxLayout:
+            orientation: "vertical"
+            padding: dp(12)
+            spacing: dp(10)
+            size_hint_y: None
+            height: self.minimum_height
+
+            Card:
+                SectionLabel:
+                    text: "Step 4 - your configs"
+                Label:
+                    id: lbl_out_info
+                    text: "Nothing built yet. Go through steps 1-3, or pick an earlier deployment in \"My configs\"."
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                FieldLabel:
+                    text: "Format"
+                Spinner:
+                    id: sp_fmt
+                    text: "Auto (recommended)"
+                    values: ["Auto (recommended)", "Xray + fragment", "Clash", "sing-box", "Patt", "Plain links"]
+                    size_hint_y: None
+                    height: dp(44)
+                    on_text: app.on_pick_fmt(self.text)
+                TextInput:
+                    id: f_sub_url
+                    multiline: False
+                    readonly: True
+                    size_hint_y: None
+                    height: dp(44)
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(44)
+                    spacing: dp(6)
+                    Button:
+                        text: "Copy link"
+                        on_release: app.copy_sub_url()
+                    Button:
+                        text: "Save all to device"
+                        on_release: app.save_all_configs()
+                TextInput:
+                    id: f_preview
+                    text: ""
+                    readonly: True
+                    size_hint_y: None
+                    height: dp(220)
+
+
+<ManageScreen>:
+    name: "manage"
+    BoxLayout:
+        orientation: "vertical"
+        padding: dp(12)
+        spacing: dp(10)
+        Card:
+            size_hint_y: None
+            SectionLabel:
+                text: "My configs"
+            SubLabel:
+                text: "Every config you have built on this phone. Tap one to load it into Step 4, or delete it."
+        ScrollView:
+            BoxLayout:
+                id: manage_list
+                orientation: "vertical"
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(8)
+                padding: dp(4)
 """
 
 
-class RootWidget(BoxLayout):
+class TokenScreen(Screen):
     pass
 
 
-def log_box(height_lines=14):
-    from kivy.uix.textinput import TextInput
-    ti = TextInput(readonly=True, background_color=(0.04, 0.07, 0.13, 1),
-                    foreground_color=(0.78, 0.82, 0.92, 1),
-                    size_hint_y=None, height=f'{18 * height_lines}dp')
-    ti.bind(minimum_height=ti.setter('height'))
-    return ti
+class ScanScreen(Screen):
+    pass
 
 
-class AetherApp(App):
-    title = "Aether WARP"
+class BuildScreen(Screen):
+    pass
+
+
+class OutputScreen(Screen):
+    pass
+
+
+class ManageScreen(Screen):
+    pass
+
+
+class DeploymentRow(BoxLayout):
+    def __init__(self, rec, index, app, **kw):
+        super().__init__(orientation="vertical", size_hint_y=None, padding=10, spacing=4, **kw)
+        self.height = 110
+        from kivy.uix.label import Label
+        from kivy.uix.button import Button
+        from kivy.graphics import Color, RoundedRectangle
+        with self.canvas.before:
+            Color(0.071, 0.102, 0.212, 1)
+            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[10])
+        self.bind(pos=self._update_bg, size=self._update_bg)
+        title = rec.get("label") or rec.get("project", "(unnamed)")
+        lbl = Label(text=f"[b]{title}[/b]\n{rec.get('base', '')}\ncreated: {rec.get('created', '')}  |  {len(rec.get('ips', []))} clean IPs",
+                    markup=True, halign="left", valign="top", size_hint_y=None, height=64, font_size="12sp")
+        lbl.bind(size=lambda i, v: setattr(i, "text_size", (i.width, None)))
+        self.add_widget(lbl)
+        row = BoxLayout(size_hint_y=None, height=34, spacing=6)
+        b1 = Button(text="Load", on_release=lambda *_: app.load_deployment(index))
+        b2 = Button(text="Rename", on_release=lambda *_: app.rename_deployment_prompt(index))
+        b3 = Button(text="Delete", on_release=lambda *_: app.delete_deployment_prompt(index))
+        row.add_widget(b1)
+        row.add_widget(b2)
+        row.add_widget(b3)
+        self.add_widget(row)
+
+    def _update_bg(self, *_):
+        self._bg.pos = self.pos
+        self._bg.size = self.size
+
+
+FORMATS_UI = [
+    ("auto", "Auto (recommended)", ""),
+    ("xray", "Xray + fragment", "?format=xray"),
+    ("clash", "Clash", "?format=clash"),
+    ("singbox", "sing-box", "?format=singbox"),
+    ("patt", "Patt", "?format=patt"),
+    ("v2ray", "Plain links", "?format=base64"),
+]
+
+
+class AminiumApp(App):
+    title = "Aminium Studio"
 
     def build(self):
-        self.base = core.app_dir()
-        self.cfg_path = os.path.join(self.base, "config.json")
-        self.settings_path = os.path.join(self.base, "aether_settings.json")
-        self.account = None
-        self.usque_proc = None
-        self.scan_rows = []
-        self.selected_row = None
-        self.vpn_connected = False
-
+        Window.clearcolor = (0.039, 0.055, 0.122, 1)
+        self.cfg = self.load_cfg()
+        self.token = self.cfg.get("token", "")
+        self.email = self.cfg.get("email", "")
+        self.accounts = []
+        self.token_ok = False
+        self.job = None
+        self.ips = []
+        self.rec = None
+        self.out = None
+        self.cur_fmt = "auto"
+        self.deployments = core.load_deployments()
         root = Builder.load_string(KV)
-        self.root_widget = root
-        self._build_connect(root.ids.connect_root)
-        self._build_account(root.ids.account_root)
-        self._build_link(root.ids.link_root)
-        self._build_scan(root.ids.scan_root)
-        self._build_settings(root.ids.settings_root)
-        self._load_settings()
-        self._gen_link()
+        self.sm = root.ids.sm
+        self.logbox = root.ids.logbox
+        self.sm.add_widget(TokenScreen())
+        self.sm.add_widget(ScanScreen())
+        self.sm.add_widget(BuildScreen())
+        self.sm.add_widget(OutputScreen())
+        self.sm.add_widget(ManageScreen())
+        Clock.schedule_once(lambda dt: self.init_fields(), 0)
         return root
 
-    # ---------------------------------------------------------- Connect
-    def _build_connect(self, parent):
-        from kivy.uix.boxlayout import BoxLayout as BL
+    # ---------- small helpers ----------
+    def cfg_path(self):
+        return core.APP_DIR / "aminium_studio_config.json"
 
-        card = Builder.load_string("Card:\n    id: c")
-        self.status_label = Label(text="Disconnected", bold=True, font_size='20sp',
-                                   color=(0.9, 0.93, 0.98, 1), size_hint_y=None, height='30dp',
-                                   halign='left', valign='middle')
-        self.status_label.bind(size=lambda w, *_: setattr(w, 'text_size', w.size))
-        self.status_sub = Label(text="Tap Connect to start the tunnel.",
-                                 color=(0.55, 0.6, 0.78, 1), size_hint_y=None, height='40dp',
-                                 halign='left', valign='top')
-        self.status_sub.bind(size=lambda w, *_: setattr(w, 'text_size', w.size))
-        card.add_widget(self.status_label)
-        card.add_widget(self.status_sub)
-
-        row = BL(size_hint_y=None, height='48dp', spacing='8dp')
-        self.btn_connect = Builder.load_string("BigButton:\n    text: 'Connect'")
-        self.btn_connect.bind(on_release=lambda *_: self.toggle_connect())
-        btn_test = Builder.load_string("GhostButton:\n    text: 'Test'")
-        btn_test.bind(on_release=lambda *_: self.do_test())
-        row.add_widget(self.btn_connect)
-        row.add_widget(btn_test)
-        card.add_widget(row)
-        parent.add_widget(card)
-
-        log_card = Builder.load_string("Card:\n    id: c")
-        log_card.add_widget(Builder.load_string("SectionLabel:\n    text: 'Console'"))
-        self.console = log_box(16)
-        log_card.add_widget(self.console)
-        parent.add_widget(log_card)
-
-    def clog(self, msg):
-        line = f"[{core.ts()}] {msg}\n"
-
-        @mainthread
-        def add(_dt=None):
-            self.console.text += line
-            try:
-                self.console.cursor = self.console.get_cursor_from_index(len(self.console.text))
-            except Exception:
-                pass
-        add()
-
-    def _set_state(self, state):
-        states = {
-            "idle": ("Disconnected", "Tap Connect to start the tunnel.", "Connect"),
-            "connecting": ("Connecting…", "Handshaking with Cloudflare (5-15s).", "Cancel"),
-            "connected": ("Connected", "Traffic is flowing through Cloudflare WARP.", "Disconnect"),
-            "error": ("Check failed", "Proxy is up but the WARP check failed. See console.", "Disconnect"),
-        }
-        title, sub, btn = states[state]
-        self.status_label.text = title
-        self.status_sub.text = sub
-        self.btn_connect.text = btn
-
-    # ----- usque process management -----
-    def _usque_path(self):
-        d = core.native_lib_dir()
-        cand = os.path.join(d, "libusque.so")
-        if os.path.exists(cand):
-            return cand
-        # desktop fallback / manual testing
-        for name in ("usque", "usque.exe", "libusque.so"):
-            p = os.path.join(self.base, name)
-            if os.path.exists(p):
-                return p
-        return cand  # best guess; c_connect will report "not found"
-
-    def toggle_connect(self):
-        if self.usque_proc and self.usque_proc.poll() is None:
-            self.do_disconnect()
-        else:
-            self.do_connect()
-
-    def do_connect(self):
-        if not os.path.exists(self.cfg_path):
-            self.clog("config.json not found - register an account first (Account tab).")
-            return
-        exe = self._usque_path()
-        if not os.path.exists(exe):
-            self.clog(f"usque binary not found at {exe}")
-            return
-        bind, port = self.s_bind.text.strip() or "127.0.0.1", self.s_port.text.strip() or "10820"
-        if not core.port_free(bind, port):
-            self.clog(f"port {port} already in use, pick another one in Settings.")
-            return
-        mode = self.s_mode or "socks"
-        args = [exe, "-c", self.cfg_path, mode, "-b", bind, "-p", str(port)]
-        if self.s_h2.active:
-            args.append("--http2")
-        if self.s_sni.text.strip():
-            args += ["-s", self.s_sni.text.strip()]
-        if self.s_extra.text.strip():
-            args += self.s_extra.text.strip().split()
-        self.clog("starting: " + " ".join(args))
-
-        def work():
-            try:
-                self.usque_proc = __import__("subprocess").Popen(
-                    args, stdout=__import__("subprocess").PIPE,
-                    stderr=__import__("subprocess").STDOUT, text=True, errors="replace")
-            except OSError as e:
-                self.clog(f"cannot run usque: {e}")
-                return
-            self._set_state_main("connecting")
-            threading.Thread(target=self._stream_usque, daemon=True).start()
-            time.sleep(1.5)
-            self.do_test(after_connect_port=port)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    @mainthread
-    def _set_state_main(self, state):
-        self._set_state(state)
-
-    def _stream_usque(self):
-        p = self.usque_proc
-        for line in p.stdout:
-            self.clog(line.rstrip())
-        self.clog(f"[usque exited with code {p.wait()}]")
-        if p is self.usque_proc:
-            self._set_state_main("idle")
-            self.vpn_connected = False
-
-    def do_test(self, after_connect_port=None):
-        bind = self.s_bind.text.strip() or "127.0.0.1"
-        port = after_connect_port or (self.s_port.text.strip() or "10820")
-
-        def work():
-            try:
-                t = core.socks5_trace(bind, port, timeout=20)
-                warp = t.get("warp")
-                self.clog(f"test: warp={warp} loc={t.get('loc')} ip={core.mask_ip(t.get('ip', '?'))}")
-                if warp in ("on", "plus"):
-                    self._set_state_main("connected")
-                    self._on_tunnel_verified(int(port))
-                else:
-                    self._set_state_main("error")
-            except Exception as e:  # noqa: BLE001
-                self.clog(f"test failed: {type(e).__name__}: {e}")
-                if self.usque_proc and self.usque_proc.poll() is None:
-                    self._set_state_main("error")
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _on_tunnel_verified(self, port):
-        """usque's SOCKS5 proxy is confirmed working -> now ask Android to
-        route the WHOLE DEVICE through it via VpnService. This is the step
-        that makes the key icon appear; on desktop it's a no-op."""
-        if self.vpn_connected:
-            return
-
-        def granted(ok):
-            if not ok:
-                self.clog("VPN permission not granted - only the local SOCKS5 proxy "
-                          f"on 127.0.0.1:{port} is running (apps must be set to use it manually).")
-                return
-            bridge.start_vpn(port)
-            bridge.keep_screen_on_and_wakelock()
-            self.vpn_connected = True
-            self.clog("system VPN tunnel established (key icon should now be visible).")
-
-        bridge.request_vpn_permission(granted)
-
-    def do_disconnect(self):
-        if self.usque_proc and self.usque_proc.poll() is None:
-            self.usque_proc.terminate()
-            self.clog("stopped usque.")
-        if self.vpn_connected:
-            bridge.stop_vpn()
-            self.vpn_connected = False
-        self._set_state("idle")
-
-    # ---------------------------------------------------------- Account
-    def _build_account(self, parent):
-        from kivy.uix.checkbox import CheckBox
-        from kivy.uix.boxlayout import BoxLayout as BL
-
-        card = Builder.load_string("Card:\n    id: c")
-        row = BL(size_hint_y=None, height='36dp', spacing='8dp')
-        self.ac_masque = CheckBox(active=True, size_hint_x=None, width='36dp')
-        row.add_widget(self.ac_masque)
-        lbl = Label(text="Enroll MASQUE key (needed for usque)", color=(0.85, 0.88, 0.95, 1),
-                    halign='left', valign='middle')
-        lbl.bind(size=lambda w, *_: setattr(w, 'text_size', w.size))
-        row.add_widget(lbl)
-        card.add_widget(row)
-
-        self.ac_proxy = Builder.load_string(
-            "Field:\n    label: 'Proxy for registration (optional)'\n"
-            "    hint: 'socks5h://127.0.0.1:10808'")
-        card.add_widget(self.ac_proxy)
-
-        btn_row = BL(size_hint_y=None, height='46dp', spacing='8dp')
-        btn_reg = Builder.load_string("BigButton:\n    text: 'Get new WARP key'")
-        btn_reg.bind(on_release=lambda *_: self.on_register())
-        btn_save = Builder.load_string("GhostButton:\n    text: 'Save'")
-        btn_save.bind(on_release=lambda *_: self.save_account_json())
-        btn_row.add_widget(btn_reg)
-        btn_row.add_widget(btn_save)
-        card.add_widget(btn_row)
-        self.btn_reg = btn_reg
-        parent.add_widget(card)
-
-        out_card = Builder.load_string("Card:\n    id: c")
-        out_card.add_widget(Builder.load_string("SectionLabel:\n    text: 'Account JSON'"))
-        self.account_out = log_box(12)
-        self.account_out.text = "Press \u201cGet new WARP key\u201d to create an account."
-        out_card.add_widget(self.account_out)
-        parent.add_widget(out_card)
-
-    def on_register(self):
-        self.btn_reg.disabled = True
-        self.btn_reg.text = "Registering…"
-        masque = self.ac_masque.active
-        proxy = self.ac_proxy.text.strip()
-
-        def work():
-            try:
-                res = core.register_warp(masque, proxy)
-                self._register_done(res, None)
-            except Exception as e:  # noqa: BLE001
-                self._register_done(None, str(e))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    @mainthread
-    def _register_done(self, res, err):
-        self.btn_reg.disabled = False
-        self.btn_reg.text = "Get new WARP key"
-        if err:
-            self.account_out.text = f"Error: {err}"
-            return
-        self.account = res
-        self.account_out.text = json.dumps(res, indent=2)
-        # save config.json for usque immediately
+    def load_cfg(self):
         try:
-            cfg = res.get("config", {})
-            cfg["endpoint_pub_key"] = cfg.get("endpoint_pub_key", "")
-            with open(self.cfg_path, "w", encoding="utf-8") as fh:
-                json.dump(res, fh, indent=2)
-            self.clog(f"saved {self.cfg_path}")
-        except Exception as e:  # noqa: BLE001
-            self.clog(f"could not save config.json: {e}")
-
-    def save_account_json(self):
-        if not self.account:
-            return
-        p = os.path.join(self.base, "warp-account.json")
-        with open(p, "w", encoding="utf-8") as fh:
-            json.dump(self.account, fh, indent=2)
-        self.clog(f"saved {p}")
-
-    # ---------------------------------------------------------- Link
-    def _build_link(self, parent):
-        from kivy.uix.spinner import Spinner
-        from kivy.uix.boxlayout import BoxLayout as BL
-
-        card = Builder.load_string("Card:\n    id: c")
-        self.lv = {}
-        specs = [("protocol", ["masque", "wireguard"]), ("scan", ["fast", "balanced", "deep"]),
-                 ("ip", ["v4", "v6"]), ("transport", ["h2", "h3"])]
-        for key, opts in specs:
-            row = BL(size_hint_y=None, height='52dp', spacing='8dp')
-            lbl = Label(text=key, size_hint_x=0.3, color=(0.55, 0.6, 0.78, 1))
-            sp = Spinner(text=opts[0], values=opts)
-            sp.bind(text=lambda *_: self._gen_link())
-            self.lv[key] = sp
-            row.add_widget(lbl)
-            row.add_widget(sp)
-            card.add_widget(row)
-        self.lv_name = Builder.load_string("Field:\n    label: 'Name'\n    text: 'my-config'")
-        self.lv_name.ids.ti.bind(text=lambda *_: self._gen_link())
-        card.add_widget(self.lv_name)
-        self.link_field = Builder.load_string("Field:\n    label: 'aether:// link'")
-        card.add_widget(self.link_field)
-        btn_row = BL(size_hint_y=None, height='46dp', spacing='8dp')
-        b1 = Builder.load_string("BigButton:\n    text: 'Copy link'")
-        b1.bind(on_release=lambda *_: self._copy(self.link_field.text))
-        b2 = Builder.load_string("GhostButton:\n    text: 'Parse into fields'")
-        b2.bind(on_release=lambda *_: self._load_link())
-        btn_row.add_widget(b1)
-        btn_row.add_widget(b2)
-        card.add_widget(btn_row)
-        parent.add_widget(card)
-
-    def _gen_link(self, *_):
-        try:
-            link = core.build_link(self.lv["protocol"].text, self.lv["scan"].text,
-                                    self.lv["ip"].text, self.lv["transport"].text,
-                                    self.lv_name.text)
-            self.link_field.text = link
+            return json.loads(self.cfg_path().read_text(encoding="utf-8"))
         except Exception:
-            pass
+            return {}
 
-    def _load_link(self):
+    def save_cfg(self):
+        self.cfg["token"] = self.token
+        self.cfg["email"] = self.email
         try:
-            d = core.parse_link(self.link_field.text)
-        except ValueError as e:
-            self.clog(str(e))
-            return
-        for k, v in d.items():
-            if k in self.lv:
-                self.lv[k].text = v
-            elif k == "name":
-                self.lv_name.text = v
+            core.APP_DIR.mkdir(parents=True, exist_ok=True)
+            self.cfg_path().write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            self.log(f"Could not save settings: {e}")
 
-    def _copy(self, text):
-        from kivy.core.clipboard import Clipboard
-        Clipboard.copy(text)
+    def log(self, msg):
+        def ui(*_):
+            self.logbox.text = (self.logbox.text + "\n" + str(msg))[-4000:]
+        Clock.schedule_once(ui, 0)
 
-    # ---------------------------------------------------------- Scan
-    def _build_scan(self, parent):
-        from kivy.uix.boxlayout import BoxLayout as BL
-        from kivy.uix.progressbar import ProgressBar
+    def goto(self, name):
+        self.sm.current = name
+        if name == "manage":
+            self.refresh_manage_list()
+        if name == "build":
+            self.refresh_build_summary()
 
-        card = Builder.load_string("Card:\n    id: c")
-        self.e_prefix = Builder.load_string(
-            "Field:\n    label: 'IP prefixes, comma separated'\n    text: '162.159.198'")
-        card.add_widget(self.e_prefix)
-        btn_row = BL(size_hint_y=None, height='46dp', spacing='8dp')
-        self.btn_scan = Builder.load_string("BigButton:\n    text: 'Scan & verify'")
-        self.btn_scan.bind(on_release=lambda *_: self.on_scan())
-        btn_use = Builder.load_string("GhostButton:\n    text: 'Use selected'")
-        btn_use.bind(on_release=lambda *_: self.use_selected())
-        btn_row.add_widget(self.btn_scan)
-        btn_row.add_widget(btn_use)
-        card.add_widget(btn_row)
-        self.scan_status = Label(text="Finds WARP endpoint IPs presenting the pinned key.",
-                                  color=(0.55, 0.6, 0.78, 1), size_hint_y=None, height='40dp',
-                                  halign='left', valign='top')
-        self.scan_status.bind(size=lambda w, *_: setattr(w, 'text_size', w.size))
-        card.add_widget(self.scan_status)
-        parent.add_widget(card)
+    def init_fields(self):
+        t = self.sm.get_screen("token")
+        t.ids.f_token.text = self.token
+        t.ids.f_email.text = self.email
+        if self.token:
+            t.ids.lbl_token_state.text = "Token loaded from this phone's storage. Press 'Save & verify'."
+        self.roll_all()
 
-        res_card = Builder.load_string("Card:\n    id: c")
-        res_card.add_widget(Builder.load_string("SectionLabel:\n    text: 'Results (tap to select)'"))
-        from kivy.uix.gridlayout import GridLayout
-        self.results_grid = GridLayout(cols=1, size_hint_y=None, spacing='2dp')
-        self.results_grid.bind(minimum_height=self.results_grid.setter('height'))
-        res_card.add_widget(self.results_grid)
-        parent.add_widget(res_card)
+    # ---------- step 1: token ----------
+    def on_save_token(self):
+        t = self.sm.get_screen("token")
+        tok = t.ids.f_token.text.strip()
+        if not tok:
+            return self.log("Paste the API token first.")
+        self.token, self.email = tok, t.ids.f_email.text.strip()
+        t.ids.lbl_token_state.text = "Checking the token..."
+
+        def work():
+            try:
+                cf = core.CF(self.token, self.log, self.email)
+                info = cf.verify()
+                accs = cf.accounts()
+                if not accs:
+                    raise core.CFError("No account visible to this token (add 'Account Settings: Read').")
+                self.accounts = accs
+                vals = [f"{a['name']} ({a['id'][:6]})" for a in accs]
+
+                def ui(*_):
+                    t.ids.sp_account.values = vals
+                    t.ids.sp_account.text = vals[0]
+                    self.token_ok = True
+                    t.ids.lbl_token_state.text = f"Token is valid ({info.get('status')}). Go to step 2."
+                    self.save_cfg()
+                Clock.schedule_once(ui, 0)
+            except Exception as e:
+                self.log(f"Token check failed: {e}")
+
+                def ui2(*_):
+                    self.token_ok = False
+                    t.ids.lbl_token_state.text = f"Token check failed: {e}"
+                Clock.schedule_once(ui2, 0)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_forget_token(self):
+        self.token, self.email, self.token_ok = "", "", False
+        self.accounts = []
+        t = self.sm.get_screen("token")
+        t.ids.f_token.text = ""
+        t.ids.f_email.text = ""
+        t.ids.sp_account.values = ["(verify token first)"]
+        t.ids.sp_account.text = "(verify token first)"
+        t.ids.lbl_token_state.text = ""
+        self.save_cfg()
+        self.log("Token removed from this phone.")
+
+    # ---------- step 2: scan ----------
+    def scan_form(self):
+        s = self.sm.get_screen("scan")
+        tls = s.ids.sp_conn.text == "TLS"
+        depth = core.DEPTH[s.ids.sp_depth.text]
+        return {
+            "host": core.SPEED_HOST, "port": 443 if tls else 80, "count": depth["count"],
+            "threads": depth["threads"], "timeout": 5.0, "rounds": 3, "target": depth["target"],
+            "mode": "spread", "custom": "", "verify": True, "neighbors": True, "auto": True,
+            "ws": False, "speed": False,
+        }
 
     def on_scan(self):
-        try:
-            pin = core.pin_from_config(self.cfg_path)
-        except Exception as e:  # noqa: BLE001
-            self.scan_status.text = f"cannot read config.json: {e}"
+        if self.job and self.job.phase in ("diagnosing", "scanning", "speed", "finishing"):
             return
-        prefixes = [p.strip() for p in self.e_prefix.text.split(",") if p.strip()]
-        if not prefixes:
+        s = self.sm.get_screen("scan")
+        cfg = core.Config.from_dict(self.scan_form())
+        self.job = core.ScanJob(cfg, self.log)
+        job = self.job
+        s.ids.btn_scan.disabled = True
+        s.ids.btn_scan.text = "Scanning..."
+        s.ids.btn_stop.disabled = False
+        Clock.schedule_once(lambda dt: self.poll_scan(), 0.3)
+
+        def go():
+            job.run()
+            Clock.schedule_once(lambda dt: self.scan_finished(), 0)
+        threading.Thread(target=go, daemon=True).start()
+
+    def on_stop_scan(self):
+        if self.job:
+            self.job.stop.set()
+            self.log("Stopping...")
+
+    def poll_scan(self):
+        job = self.job
+        if not job:
             return
-        self.btn_scan.disabled = True
-        self.btn_scan.text = "Scanning…"
-        self.scan_status.text = f"scanning {len(prefixes) * 254} hosts…"
+        s = self.sm.get_screen("scan")
+        snap = job.snapshot()
+        s.ids.lbl_scan_stats.text = f"{snap['phase']}  -  {snap['tested']}/{snap['total']}  -  {snap['elapsed']}s  -  {snap['found']} found"
+        if snap["total"]:
+            s.ids.pb_scan.value = min(1.0, snap["tested"] / snap["total"])
+        if snap["phase"] in ("diagnosing", "scanning", "speed", "finishing", "idle"):
+            Clock.schedule_once(lambda dt: self.poll_scan(), 0.5)
+
+    def scan_finished(self):
+        s = self.sm.get_screen("scan")
+        s.ids.btn_scan.disabled = False
+        s.ids.btn_scan.text = "\u25b6  Start scan"
+        s.ids.btn_stop.disabled = True
+        snap = self.job.snapshot() if self.job else {"results": []}
+        results = sorted(snap["results"], key=lambda r: -r["score"])
+        self.ips = [r["ip"] for r in results]
+        s.ids.lbl_ip_list.text = "\n".join(f"{r['ip']}  score={r['score']}  {r.get('colo', '')}" for r in results[:60]) or "nothing found - see the log"
+        self.log(f"Finished: {len(self.ips)} clean IPs.")
+
+    # ---------- step 3: build ----------
+    def roll_all(self):
+        b = self.sm.get_screen("build")
+        b.ids.f_project.text = core.rnd_name()
+        b.ids.f_pass.text = core.rnd(20)
+        b.ids.f_panel.text = "/" + core.rnd(10, core.LOWER)
+        self._ws_path = "/stream/" + core.rnd(18, core.LOWER)
+        self._cron = core.rnd(24)
+        self._uuid = str(uuidlib.uuid4())
+        default_zip = core.APP_DIR / "aminium-pages.zip"
+        if not b.ids.f_source.text and default_zip.exists():
+            b.ids.f_source.text = str(default_zip)
+
+    def pick_source_file(self):
+        self.log("On Android, place aminium-pages.zip in the app's data folder, or wire a file picker here "
+                  "(plyer.filechooser) for the person to browse to it.")
+
+    def refresh_build_summary(self):
+        b = self.sm.get_screen("build")
+        n = len(self.ips)
+        tls = self.sm.get_screen("scan").ids.sp_conn.text == "TLS"
+        ports = len(core.TLS_PORTS if tls else core.PLAIN_PORTS)
+        b.ids.lbl_build_sum.text = (f"{n} clean IPs (+ your worker's own address)  x  {ports} ports  x  2 protocols\n"
+                                     f"= up to {(n + 1) * ports * 2} configs\nConnection: {'TLS' if tls else 'No TLS'}")
+
+    def on_build(self):
+        b = self.sm.get_screen("build")
+        project = b.ids.f_project.text.strip().lower()
+        source = b.ids.f_source.text.strip()
+        if not self.ips:
+            return self.log("ERROR: no clean IPs yet - run step 2 first.")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,56}", project or ""):
+            return self.log("ERROR: project name: lowercase letters, digits and '-' only.")
+        import pathlib
+        if not source or not pathlib.Path(source).exists():
+            return self.log("ERROR: source zip not found - pick aminium-pages.zip first.")
+        if not b.ids.f_pass.text:
+            return self.log("ERROR: ADMIN_PASSWORD is empty.")
+        panel = b.ids.f_panel.text.strip()
+        if panel and not panel.startswith("/"):
+            panel = "/" + panel
+            b.ids.f_panel.text = panel
+        mode = "workers" if b.ids.sp_mode.text.startswith("Workers") else "pages"
+        tls = self.sm.get_screen("scan").ids.sp_conn.text == "TLS"
+        form = {
+            "pass": b.ids.f_pass.text, "ws_path": self._ws_path, "cron": self._cron, "uuid": self._uuid,
+            "decoy": "", "tg_token": "", "tg_secret": "", "tg_admins": "", "domain": b.ids.f_domain.text.strip().lower(),
+            "d1": True, "verify_ws": True, "scan": self.scan_form(), "ips": list(self.ips), "keep": 100, "tls": tls,
+        }
+        b.ids.btn_build.disabled = True
+        b.ids.btn_build.text = "Building..."
+        b.ids.pb_build.value = 0
+
+        def stage(text, frac):
+            def ui(*_):
+                b.ids.lbl_build_stage.text = text
+                b.ids.pb_build.value = frac
+            Clock.schedule_once(ui, 0)
 
         def work():
-            res = core.scan_prefixes(prefixes, pin, core.SNI)
-            self._scan_done(res)
+            try:
+                result = core.run_build(self.token, self.email, self.accounts, None, project, source, panel, mode, form, self.log, stage)
+                self.rec, self.out = result["rec"], result["out"]
+                self.deployments = core.add_deployment(self.rec)
 
+                def ui(*_):
+                    b.ids.btn_build.disabled = False
+                    b.ids.btn_build.text = "\u26a1  Build my configs"
+                    self.render_output()
+                    self.goto("output")
+                Clock.schedule_once(ui, 0)
+            except Exception as e:
+                self.log(f"ERROR: {e}")
+
+                def ui2(*_):
+                    b.ids.btn_build.disabled = False
+                    b.ids.btn_build.text = "\u26a1  Build my configs"
+                    b.ids.lbl_build_stage.text = "Something went wrong - see the log."
+                Clock.schedule_once(ui2, 0)
         threading.Thread(target=work, daemon=True).start()
 
-    @mainthread
-    def _scan_done(self, res):
-        self.btn_scan.disabled = False
-        self.btn_scan.text = "Scan & verify"
-        self.scan_rows = res[:60]
-        self.selected_row = None
-        good = [r for r in res if r[2]]
-        self.scan_status.text = f"{len(res)} answered, {len(good)} verified (pinned key OK)."
-        self.results_grid.clear_widgets()
-        for i, (ip, ms, ok) in enumerate(self.scan_rows):
-            btn = Button(text=f"{i+1:02d}  {ip}   {ms:.0f} ms   {'VERIFIED' if ok else 'mismatch'}",
-                         size_hint_y=None, height='34dp',
-                         background_normal='', background_down='',
-                         background_color=(0.08, 0.3, 0.2, 1) if ok else (0.3, 0.1, 0.1, 1),
-                         color=(0.9, 0.95, 0.9, 1))
-            btn.row_index = i
-            btn.bind(on_release=self._select_row)
-            self.results_grid.add_widget(btn)
-
-    def _select_row(self, btn):
-        self.selected_row = self.scan_rows[btn.row_index]
-
-    def use_selected(self):
-        if not self.selected_row:
-            self.clog("select a result row first")
+    # ---------- step 4: configs ----------
+    def render_output(self):
+        o = self.sm.get_screen("output")
+        if not self.rec:
+            o.ids.lbl_out_info.text = "Nothing built yet."
             return
-        ip, _ms, ok = self.selected_row
-        if not ok:
-            self.clog("that IP does not present the pinned key")
+        n = len(self.out["links"]) if self.out else 0
+        o.ids.lbl_out_info.text = (f"{n} configs  -  {len(self.rec.get('ips', []))} clean IPs\n"
+                                    f"Panel:    {self.rec['base']}{self.rec['panel_path']}\nPassword: {self.rec['password']}")
+        self.on_pick_fmt(o.ids.sp_fmt.text)
+
+    def on_pick_fmt(self, label):
+        o = self.sm.get_screen("output")
+        key, _, q = next((x for x in FORMATS_UI if x[1] == label), FORMATS_UI[0])
+        self.cur_fmt = key
+        if not self.out:
+            o.ids.f_sub_url.text = ""
+            o.ids.f_preview.text = "No configs available yet."
             return
+        if key == "auto":
+            o.ids.f_sub_url.text = self.out["sub"]
+        else:
+            o.ids.f_sub_url.text = self.out["sub"] + q
+        o.ids.f_preview.text = (self.out["text"].get(key) or "(empty)")[:4000]
+
+    def copy_sub_url(self):
+        o = self.sm.get_screen("output")
+        from kivy.core.clipboard import Clipboard
+        Clipboard.copy(o.ids.f_sub_url.text)
+        self.log("Copied.")
+
+    def save_all_configs(self):
+        if not (self.rec and self.out):
+            return self.log("Nothing to save yet.")
         try:
-            with open(self.cfg_path, encoding="utf-8") as fh:
-                data = json.load(fh)
-            with open(self.cfg_path + ".bak", "w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2)
-            data.setdefault("config", {})
-            data["config"]["endpoint_h2_v4"] = ip
-            data["config"]["endpoint_v4"] = ip
-            with open(self.cfg_path, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2)
-        except Exception as e:  # noqa: BLE001
-            self.clog(f"could not update config: {e}")
+            folder = core.save_all(self.rec, self.out, self.log)
+            self.log(f"Saved to {folder}")
+        except Exception as e:
+            self.log(f"ERROR: save failed: {e}")
+
+    # ---------- "My configs" management screen (the new feature) ----------
+    def refresh_manage_list(self):
+        m = self.sm.get_screen("manage")
+        box = m.ids.manage_list
+        box.clear_widgets()
+        self.deployments = core.load_deployments()
+        if not self.deployments:
+            from kivy.uix.label import Label
+            box.add_widget(Label(text="No configs built yet.", size_hint_y=None, height=40))
             return
-        self.clog(f"endpoint set to {ip} (backup saved). Reconnect to apply.")
+        for i, rec in enumerate(reversed(self.deployments)):
+            real_index = len(self.deployments) - 1 - i
+            box.add_widget(DeploymentRow(rec, real_index, self))
 
-    # ---------------------------------------------------------- Settings
-    def _build_settings(self, parent):
-        from kivy.uix.checkbox import CheckBox
-        from kivy.uix.spinner import Spinner
-        from kivy.uix.boxlayout import BoxLayout as BL
-
-        card = Builder.load_string("Card:\n    id: c")
-        self.s_bind = Builder.load_string("Field:\n    label: 'Bind address'\n    text: '127.0.0.1'")
-        self.s_port = Builder.load_string("Field:\n    label: 'SOCKS port'\n    text: '10820'")
-        self.s_sni = Builder.load_string(f"Field:\n    label: 'SNI'\n    hint: '{core.SNI}'")
-        self.s_extra = Builder.load_string("Field:\n    label: 'Extra usque args'")
-        for f in (self.s_bind, self.s_port, self.s_sni, self.s_extra):
-            card.add_widget(f)
-
-        row = BL(size_hint_y=None, height='52dp', spacing='8dp')
-        row.add_widget(Label(text="mode", size_hint_x=0.3, color=(0.55, 0.6, 0.78, 1)))
-        self.s_mode_spinner = Spinner(text="socks", values=["socks", "l4-socks"])
-        self.s_mode_spinner.bind(text=lambda sp, v: setattr(self, "s_mode", v))
-        self.s_mode = "socks"
-        row.add_widget(self.s_mode_spinner)
-        card.add_widget(row)
-
-        h2row = BL(size_hint_y=None, height='36dp', spacing='8dp')
-        self.s_h2 = CheckBox(active=True, size_hint_x=None, width='36dp')
-        h2row.add_widget(self.s_h2)
-        lbl = Label(text="HTTP/2 over TCP (--http2, use if QUIC/UDP is blocked)",
-                    color=(0.85, 0.88, 0.95, 1), halign='left', valign='middle')
-        lbl.bind(size=lambda w, *_: setattr(w, 'text_size', w.size))
-        h2row.add_widget(lbl)
-        card.add_widget(h2row)
-
-        btn_save = Builder.load_string("BigButton:\n    text: 'Save settings'")
-        btn_save.bind(on_release=lambda *_: self._save_settings())
-        card.add_widget(btn_save)
-        parent.add_widget(card)
-
-    def _load_settings(self):
-        data = core.load_settings(self.settings_path)
-        if not data:
+    def load_deployment(self, index):
+        items = core.load_deployments()
+        if not (0 <= index < len(items)):
             return
-        self.s_bind.text = data.get("bind", self.s_bind.text)
-        self.s_port.text = data.get("port", self.s_port.text)
-        self.s_sni.text = data.get("sni", self.s_sni.text)
-        self.s_extra.text = data.get("extra", self.s_extra.text)
-        self.s_mode_spinner.text = data.get("mode", self.s_mode_spinner.text)
-        self.s_h2.active = bool(data.get("http2", True))
+        rec = items[index]
+        self.rec = rec
+        self.log(f"Loading configs of {rec['project']} ...")
 
-    def _save_settings(self):
-        data = {"bind": self.s_bind.text, "port": self.s_port.text, "sni": self.s_sni.text,
-                "extra": self.s_extra.text, "mode": self.s_mode_spinner.text, "http2": self.s_h2.active}
-        core.save_settings(data, self.settings_path)
-        self.clog("settings saved")
+        def work():
+            try:
+                out = core.fetch_configs(rec["sub"], self.log) if rec.get("sub") else None
+            except Exception as e:
+                self.log(f"Could not load: {e}")
+                out = None
+            self.out = out
 
+            def ui(*_):
+                self.render_output()
+                self.goto("output")
+            Clock.schedule_once(ui, 0)
+        threading.Thread(target=work, daemon=True).start()
 
-from kivy.uix.button import Button  # noqa: E402  (used in _scan_done)
+    def rename_deployment_prompt(self, index):
+        items = core.load_deployments()
+        if not (0 <= index < len(items)):
+            return
+        content = BoxLayout(orientation="vertical", padding=10, spacing=10)
+        from kivy.uix.textinput import TextInput
+        from kivy.uix.button import Button
+        ti = TextInput(text=items[index].get("label") or items[index].get("project", ""), multiline=False, size_hint_y=None, height=44)
+        content.add_widget(ti)
+        btn = Button(text="Save", size_hint_y=None, height=44)
+        content.add_widget(btn)
+        popup = Popup(title="Rename this config", content=content, size_hint=(0.85, 0.35))
+
+        def do_save(*_):
+            core.rename_deployment(items, index, ti.text.strip() or items[index].get("project", ""))
+            popup.dismiss()
+            self.refresh_manage_list()
+        btn.bind(on_release=do_save)
+        popup.open()
+
+    def delete_deployment_prompt(self, index):
+        items = core.load_deployments()
+        if not (0 <= index < len(items)):
+            return
+        content = BoxLayout(orientation="vertical", padding=10, spacing=10)
+        from kivy.uix.label import Label
+        from kivy.uix.button import Button
+        content.add_widget(Label(text=f"Delete \"{items[index].get('label') or items[index]['project']}\" from this list?\n"
+                                       "(The Cloudflare project itself is NOT touched.)"))
+        row = BoxLayout(size_hint_y=None, height=44, spacing=8)
+        b_yes = Button(text="Delete")
+        b_no = Button(text="Cancel")
+        row.add_widget(b_yes)
+        row.add_widget(b_no)
+        content.add_widget(row)
+        popup = Popup(title="Confirm delete", content=content, size_hint=(0.85, 0.4))
+
+        def do_delete(*_):
+            core.delete_deployment(items, index, log=self.log, also_remove_remote=False)
+            popup.dismiss()
+            self.refresh_manage_list()
+        b_yes.bind(on_release=do_delete)
+        b_no.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+
 
 if __name__ == "__main__":
-    AetherApp().run()
+    AminiumApp().run()
