@@ -28,7 +28,7 @@ from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle, Tri
 from kivy.graphics.texture import Texture
 from kivy.lang import Builder
 from kivy.metrics import dp
-from kivy.properties import BooleanProperty, ListProperty, NumericProperty, StringProperty
+from kivy.properties import BooleanProperty, ListProperty, NumericProperty, ObjectProperty, StringProperty
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
@@ -52,12 +52,15 @@ if platform == "android":
         pass
 
 # ───────────────────────────── palette ─────────────────────────────
-C_PRIMARY = (0.31, 0.275, 0.90, 1)
-C_CYAN = (0.02, 0.71, 0.83, 1)
-C_TEXT = (0.06, 0.09, 0.16, 1)
-C_MUTED = (0.39, 0.45, 0.55, 1)
-C_OK = (0.09, 0.64, 0.29, 1)
-C_ERR = (0.86, 0.20, 0.20, 1)
+C_PRIMARY = (0.49, 0.36, 0.98, 1)     # violet
+C_CYAN = (0.13, 0.83, 0.93, 1)        # aqua
+C_TEXT = (0.94, 0.96, 1.00, 1)
+C_MUTED = (0.60, 0.66, 0.79, 1)
+C_OK = (0.25, 0.85, 0.55, 1)
+C_ERR = (1.00, 0.42, 0.46, 1)
+C_SURFACE = (0.075, 0.095, 0.185, 1)  # cards / popups
+C_FIELD = (0.045, 0.058, 0.125, 1)    # inputs
+C_BG = (0.028, 0.038, 0.085, 1)
 
 TABS = [
     ("token", "Token", "Step 1  -  Connect Cloudflare"),
@@ -92,10 +95,12 @@ def gradient_texture(c1, c2, vertical=True):
 # ───────────────────────────── KV (layout + styles) ─────────────────────────────
 KV = r"""
 #:import dp kivy.metrics.dp
-#:set C_PRIMARY (0.31, 0.275, 0.90, 1)
-#:set C_CYAN (0.02, 0.71, 0.83, 1)
-#:set C_TEXT (0.06, 0.09, 0.16, 1)
-#:set C_MUTED (0.39, 0.45, 0.55, 1)
+#:set C_PRIMARY (0.49, 0.36, 0.98, 1)
+#:set C_CYAN (0.13, 0.83, 0.93, 1)
+#:set C_TEXT (0.94, 0.96, 1.00, 1)
+#:set C_MUTED (0.60, 0.66, 0.79, 1)
+#:set C_SURFACE (0.075, 0.095, 0.185, 1)
+#:set C_FIELD (0.045, 0.058, 0.125, 1)
 
 <H1@Label>:
     bold: True
@@ -109,7 +114,7 @@ KV = r"""
 
 <Body@Label>:
     font_size: "13sp"
-    color: 0.20, 0.25, 0.35, 1
+    color: 0.82, 0.87, 0.96, 1
     size_hint_y: None
     height: self.texture_size[1] + dp(2)
     halign: "left"
@@ -150,17 +155,28 @@ KV = r"""
     height: self.minimum_height
     canvas.before:
         Color:
-            rgba: 0.06, 0.09, 0.20, 0.06
+            rgba: 0, 0, 0, 0.35
         RoundedRectangle:
-            pos: self.x, self.y - dp(2)
+            pos: self.x, self.y - dp(3)
             size: self.size
-            radius: [dp(20)]
+            radius: [dp(22)]
         Color:
-            rgba: 1, 1, 1, 1
+            rgba: C_SURFACE
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(20)]
+            radius: [dp(22)]
+        Color:
+            rgba: 1, 1, 1, 0.07
+        Line:
+            rounded_rectangle: self.x, self.y, self.width, self.height, dp(22)
+            width: dp(1)
+        Color:
+            rgba: 0.49, 0.36, 0.98, 0.55
+        RoundedRectangle:
+            pos: self.x + dp(22), self.top - dp(2)
+            size: self.width - dp(44), dp(2)
+            radius: [dp(1)]
 
 <RoundButton>:
     size_hint_y: None
@@ -170,11 +186,30 @@ KV = r"""
     color: self.fg
     canvas.before:
         Color:
+            rgba: (0.49, 0.36, 0.98, 0.28) if (self.kind == "primary" and not self.disabled) else (0, 0, 0, 0)
+        RoundedRectangle:
+            pos: self.x - dp(2), self.y - dp(4)
+            size: self.width + dp(4), self.height + dp(4)
+            radius: [dp(17)]
+        Color:
             rgba: self.bg_color
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(14)]
+            radius: [dp(15)]
+        Color:
+            rgba: (1, 1, 1, 1) if (self.kind == "primary" and not self.disabled) else (0, 0, 0, 0)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(15)]
+            texture: app.grad_h
+        Color:
+            rgba: (1, 1, 1, 0.10) if not self.disabled else (0, 0, 0, 0)
+        RoundedRectangle:
+            pos: self.x + dp(8), self.y + self.height * 0.55
+            size: self.width - dp(16), self.height * 0.38
+            radius: [dp(10)]
 
 <RoundInput>:
     multiline: False
@@ -184,24 +219,26 @@ KV = r"""
     background_active: ""
     background_disabled_normal: ""
     background_color: 0, 0, 0, 0
-    foreground_color: C_TEXT
-    cursor_color: C_PRIMARY
-    hint_text_color: 0.6, 0.65, 0.75, 1
-    selection_color: 0.31, 0.275, 0.90, 0.25
-    font_size: "14sp"
+    foreground_color: 0.97, 0.98, 1, 1
+    disabled_foreground_color: 0.80, 0.85, 0.95, 1
+    cursor_color: C_CYAN
+    cursor_width: dp(2)
+    hint_text_color: 0.58, 0.64, 0.80, 1
+    selection_color: 0.13, 0.83, 0.93, 0.28
+    font_size: "15sp"
     padding: [dp(14), max(dp(10), (self.height - self.line_height) / 2)]
     canvas.before:
         Color:
-            rgba: (0.93, 0.94, 1, 1) if self.focus else (0.945, 0.953, 0.973, 1)
+            rgba: (0.06, 0.08, 0.17, 1) if self.focus else C_FIELD
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(12)]
+            radius: [dp(14)]
         Color:
-            rgba: C_PRIMARY if self.focus else (0.88, 0.90, 0.94, 1)
+            rgba: C_CYAN if self.focus else (1, 1, 1, 0.10)
         Line:
-            rounded_rectangle: self.x, self.y, self.width, self.height, dp(12)
-            width: dp(1.2) if self.focus else dp(1)
+            rounded_rectangle: self.x, self.y, self.width, self.height, dp(14)
+            width: dp(1.4) if self.focus else dp(1)
 
 <RoundSpinner>:
     size_hint_y: None
@@ -209,26 +246,26 @@ KV = r"""
     background_normal: ""
     background_down: ""
     background_color: 0, 0, 0, 0
-    color: C_TEXT
-    font_size: "14sp"
+    color: 0.97, 0.98, 1, 1
+    font_size: "15sp"
     halign: "left"
     valign: "middle"
     text_size: self.width - dp(46), self.height
     padding_x: dp(14)
     canvas.before:
         Color:
-            rgba: 0.945, 0.953, 0.973, 1
+            rgba: C_FIELD
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(12)]
+            radius: [dp(14)]
         Color:
-            rgba: 0.88, 0.90, 0.94, 1
+            rgba: 1, 1, 1, 0.10
         Line:
-            rounded_rectangle: self.x, self.y, self.width, self.height, dp(12)
+            rounded_rectangle: self.x, self.y, self.width, self.height, dp(14)
             width: dp(1)
         Color:
-            rgba: C_PRIMARY
+            rgba: C_CYAN
         Line:
             points: self.right - dp(28), self.center_y + dp(3), self.right - dp(21), self.center_y - dp(4), self.right - dp(14), self.center_y + dp(3)
             width: dp(1.5)
@@ -236,24 +273,24 @@ KV = r"""
 <SpinnerOption>:
     background_normal: ""
     background_down: ""
-    background_color: (0.93, 0.94, 1, 1) if self.state == "down" else (1, 1, 1, 1)
-    color: C_TEXT
+    background_color: (0.22, 0.18, 0.48, 1) if self.state == "down" else (0.09, 0.11, 0.22, 1)
+    color: 0.97, 0.98, 1, 1
     size_hint_y: None
     height: dp(44)
-    font_size: "14sp"
+    font_size: "15sp"
 
 <SoftBar>:
     size_hint_y: None
     height: dp(8)
     canvas:
         Color:
-            rgba: 0.90, 0.92, 0.96, 1
+            rgba: 1, 1, 1, 0.08
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(4)]
         Color:
-            rgba: C_PRIMARY
+            rgba: C_CYAN
         RoundedRectangle:
             pos: self.pos
             size: max(self.height, self.width * min(1.0, self.value)), self.height
@@ -264,11 +301,16 @@ KV = r"""
     padding: dp(8)
     canvas.before:
         Color:
-            rgba: 1, 1, 1, 1
+            rgba: C_SURFACE
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(16)]
+            radius: [dp(18)]
+        Color:
+            rgba: 1, 1, 1, 0.07
+        Line:
+            rounded_rectangle: self.x, self.y, self.width, self.height, dp(18)
+            width: dp(1)
     Label:
         text: root.value
         bold: True
@@ -283,14 +325,20 @@ KV = r"""
 <NavTab>:
     font_size: "12sp"
     bold: self.active
-    color: C_PRIMARY if self.active else C_MUTED
+    color: C_CYAN if self.active else C_MUTED
     canvas.before:
         Color:
-            rgba: (0.31, 0.275, 0.90, 0.10) if self.active else (0, 0, 0, 0)
+            rgba: (0.49, 0.36, 0.98, 0.22) if self.active else (0, 0, 0, 0)
         RoundedRectangle:
             pos: self.x + dp(6), self.y + dp(8)
             size: self.width - dp(12), self.height - dp(16)
-            radius: [dp(14)]
+            radius: [dp(16)]
+        Color:
+            rgba: C_CYAN if self.active else (0, 0, 0, 0)
+        RoundedRectangle:
+            pos: self.x + self.width * 0.32, self.top - dp(3)
+            size: self.width * 0.36, dp(3)
+            radius: [dp(2)]
 
 <IpRow>:
     size_hint_y: None
@@ -299,11 +347,16 @@ KV = r"""
     spacing: dp(8)
     canvas.before:
         Color:
-            rgba: 0.945, 0.953, 0.973, 1
+            rgba: C_SURFACE
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(12)]
+            radius: [dp(14)]
+        Color:
+            rgba: 1, 1, 1, 0.06
+        Line:
+            rounded_rectangle: self.x, self.y, self.width, self.height, dp(14)
+            width: dp(1)
     BoxLayout:
         orientation: "vertical"
         Label:
@@ -327,10 +380,10 @@ KV = r"""
         font_size: "15sp"
         size_hint_x: None
         width: dp(46)
-        color: (0.09, 0.64, 0.29, 1) if root.score >= 70 else ((0.85, 0.55, 0.05, 1) if root.score >= 40 else (0.86, 0.20, 0.20, 1))
+        color: (0.25, 0.90, 0.58, 1) if root.score >= 70 else ((1, 0.78, 0.30, 1) if root.score >= 40 else (1, 0.45, 0.48, 1))
         canvas.before:
             Color:
-                rgba: (0.86, 0.97, 0.89, 1) if root.score >= 70 else ((1, 0.95, 0.82, 1) if root.score >= 40 else (1, 0.88, 0.88, 1))
+                rgba: (0.08, 0.30, 0.22, 1) if root.score >= 70 else ((0.32, 0.25, 0.07, 1) if root.score >= 40 else (0.34, 0.11, 0.14, 1))
             RoundedRectangle:
                 pos: self.x, self.y + dp(8)
                 size: self.width, self.height - dp(16)
@@ -391,13 +444,18 @@ KV = r"""
 <LogBar>:
     size_hint_y: None
     height: dp(30)
-    padding: dp(14), 0
+    padding: dp(30), 0, dp(14), 0
     canvas.before:
         Color:
-            rgba: 0.93, 0.94, 0.98, 1
+            rgba: 0.02, 0.03, 0.07, 1
         Rectangle:
             pos: self.pos
             size: self.size
+        Color:
+            rgba: C_CYAN
+        Rectangle:
+            pos: self.x + dp(14), self.center_y - dp(3)
+            size: dp(6), dp(6)
     Label:
         id: lbl_log
         text: root.last
@@ -416,11 +474,16 @@ KV = r"""
     color: 1, 1, 1, 1
     canvas.before:
         Color:
-            rgba: 0.06, 0.09, 0.16, 0.92
+            rgba: 0.13, 0.15, 0.30, 0.97
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: [dp(16)]
+            radius: [dp(18)]
+        Color:
+            rgba: 0.13, 0.83, 0.93, 0.7
+        Line:
+            rounded_rectangle: self.x, self.y, self.width, self.height, dp(18)
+            width: dp(1.1)
 
 <Radar>:
     size_hint_y: None
@@ -456,10 +519,32 @@ FloatLayout:
         orientation: "vertical"
         canvas.before:
             Color:
-                rgba: 0.957, 0.965, 0.984, 1
+                rgba: 0.028, 0.038, 0.085, 1
             Rectangle:
                 pos: self.pos
                 size: self.size
+            Color:
+                rgba: 0.49, 0.36, 0.98, 0.05
+            Ellipse:
+                pos: self.x - self.width * 0.55, self.top - self.width * 0.75
+                size: self.width * 1.3, self.width * 1.3
+            Ellipse:
+                pos: self.x - self.width * 0.40, self.top - self.width * 0.60
+                size: self.width * 1.0, self.width * 1.0
+            Ellipse:
+                pos: self.x - self.width * 0.25, self.top - self.width * 0.45
+                size: self.width * 0.7, self.width * 0.7
+            Color:
+                rgba: 0.13, 0.83, 0.93, 0.04
+            Ellipse:
+                pos: self.right - self.width * 0.75, self.y - self.width * 0.55
+                size: self.width * 1.3, self.width * 1.3
+            Ellipse:
+                pos: self.right - self.width * 0.60, self.y - self.width * 0.40
+                size: self.width * 1.0, self.width * 1.0
+            Ellipse:
+                pos: self.right - self.width * 0.45, self.y - self.width * 0.25
+                size: self.width * 0.7, self.width * 0.7
 
         GradientBox:
             size_hint_y: None
@@ -511,15 +596,15 @@ FloatLayout:
             padding: dp(6), 0
             canvas.before:
                 Color:
-                    rgba: 0.06, 0.09, 0.20, 0.07
-                Rectangle:
-                    pos: self.x, self.top
-                    size: self.width, dp(1.5)
-                Color:
-                    rgba: 1, 1, 1, 1
+                    rgba: 0.045, 0.058, 0.13, 1
                 Rectangle:
                     pos: self.pos
                     size: self.size
+                Color:
+                    rgba: 1, 1, 1, 0.08
+                Rectangle:
+                    pos: self.x, self.top
+                    size: self.width, dp(1)
 
 
 <TokenScreen>:
@@ -739,6 +824,26 @@ FloatLayout:
                 RoundInput:
                     id: f_domain
                 FieldLabel:
+                    text: "Network you connect from (MCI / Irancell / Rightel / home internet)"
+                RoundSpinner:
+                    id: sp_net
+                    text: "Auto-detect (recommended)"
+                    values: ["Auto-detect (recommended)", "Default (all networks)", "MCI (Hamrah-e-Avval)", "Irancell", "Rightel", "Home internet (ADSL / Fiber)"]
+                Muted:
+                    text: "One subscription then carries separate clean IPs and fragment values for each network, so it connects on mobile and at home."
+                FieldLabel:
+                    text: "Fragment override, length and interval (optional, e.g. 10-30 and 1-2)"
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(46)
+                    spacing: dp(8)
+                    RoundInput:
+                        id: f_frag_len
+                        hint_text: "length  10-30"
+                    RoundInput:
+                        id: f_frag_int
+                        hint_text: "interval  1-2"
+                FieldLabel:
                     text: "Temporary proxy for the panel (optional)  e.g. 1.2.3.4:8080 or socks5://1.2.3.4:1080"
                 RoundInput:
                     id: f_proxy
@@ -862,14 +967,14 @@ class RoundSpinner(Spinner):
 
 class RoundButton(ButtonBehavior, Label):
     kind = StringProperty("primary")      # primary | soft | danger | ghost
-    bg_color = ListProperty([0.31, 0.275, 0.90, 1])
+    bg_color = ListProperty([0.49, 0.36, 0.98, 1])
     fg = ListProperty([1, 1, 1, 1])
 
     _PALETTE = {
-        "primary": ((0.31, 0.275, 0.90, 1), (1, 1, 1, 1)),
-        "soft": ((0.90, 0.91, 1.0, 1), (0.31, 0.275, 0.90, 1)),
-        "danger": ((1.0, 0.90, 0.90, 1), (0.80, 0.12, 0.12, 1)),
-        "ghost": ((0, 0, 0, 0), (0.39, 0.45, 0.55, 1)),
+        "primary": ((0.49, 0.36, 0.98, 1), (1, 1, 1, 1)),
+        "soft": ((0.14, 0.17, 0.33, 1), (0.70, 0.82, 1.0, 1)),
+        "danger": ((0.32, 0.10, 0.15, 1), (1.0, 0.52, 0.56, 1)),
+        "ghost": ((0, 0, 0, 0), (0.60, 0.66, 0.79, 1)),
     }
 
     def __init__(self, **kw):
@@ -882,7 +987,7 @@ class RoundButton(ButtonBehavior, Label):
     def _recalc(self, *_):
         bg, fg = self._PALETTE.get(self.kind, self._PALETTE["primary"])
         if self.disabled:
-            bg, fg = (0.89, 0.91, 0.94, 1), (0.62, 0.66, 0.72, 1)
+            bg, fg = (0.10, 0.12, 0.22, 1), (0.40, 0.45, 0.58, 1)
         elif self.state == "down":
             bg = (bg[0] * 0.86, bg[1] * 0.86, bg[2] * 0.86, bg[3])
         self.bg_color = list(bg)
@@ -901,7 +1006,7 @@ class SoftBar(Widget):
 class StatBox(BoxLayout):
     value = StringProperty("0")
     caption = StringProperty("")
-    accent = ListProperty([0.31, 0.275, 0.90, 1])
+    accent = ListProperty([0.13, 0.83, 0.93, 1])
 
 
 class IpRow(BoxLayout):
@@ -1056,12 +1161,17 @@ class Ring(FloatLayout):
             cx, cy = self.center
             r = min(self.size) / 2 - dp(10)
             w = dp(9)
-            Color(0.90, 0.92, 0.97, 1)
+            Color(1, 1, 1, 0.08)
             Line(circle=(cx, cy, r), width=w)
-            Color(*C_PRIMARY)
             if self.busy and self.value <= 0.01:
+                Color(0.13, 0.83, 0.93, 0.18)
+                Line(circle=(cx, cy, r, self._rot, self._rot + 100), width=w * 2.2, cap="round")
+                Color(*C_CYAN)
                 Line(circle=(cx, cy, r, self._rot, self._rot + 100), width=w, cap="round")
             elif self.value > 0.005:
+                Color(0.49, 0.36, 0.98, 0.20)
+                Line(circle=(cx, cy, r, 0, 360 * min(1.0, self.value)), width=w * 2.2, cap="round")
+                Color(*C_CYAN)
                 Line(circle=(cx, cy, r, 0, 360 * min(1.0, self.value)), width=w, cap="round")
 
 
@@ -1155,9 +1265,11 @@ class ManageScreen(Screen):
 # ───────────────────────────── the app ─────────────────────────────
 class AminiumApp(App):
     title = "Aminium Studio"
+    grad_h = ObjectProperty(None)
 
     def build(self):
-        Window.clearcolor = (0.957, 0.965, 0.984, 1)
+        Window.clearcolor = C_BG
+        self.grad_h = gradient_texture(C_PRIMARY, C_CYAN, vertical=False)
         try:
             Window.softinput_mode = "below_target"      # keyboard pushes the focused field up
         except Exception:
@@ -1257,7 +1369,7 @@ class AminiumApp(App):
 
     def make_popup(self, title, content, size_hint):
         return Popup(title=title, content=content, size_hint=size_hint, background="",
-                     background_color=(1, 1, 1, 1), title_color=C_TEXT, separator_color=C_PRIMARY)
+                     background_color=C_SURFACE, title_color=C_TEXT, separator_color=C_CYAN)
 
     def set_status(self, label, text, kind="info"):
         label.text = text
@@ -1636,6 +1748,7 @@ class AminiumApp(App):
             "decoy": "", "tg_token": "", "tg_secret": "", "tg_admins": "", "domain": b.ids.f_domain.text.strip().lower(),
             "d1": True, "verify_ws": True, "scan": self.scan_form(), "ips": list(self.ips), "keep": 100, "tls": tls,
             "proxy": b.ids.f_proxy.text.strip(), "auto_proxy": bool(self.cfg.get("auto_proxy", True)),
+            "net": self.resolve_net(), "frag_len": b.ids.f_frag_len.text.strip(), "frag_int": b.ids.f_frag_int.text.strip(),
         }
         self.cfg["panel_proxy"] = form["proxy"]
         self.save_cfg()
@@ -1724,6 +1837,47 @@ class AminiumApp(App):
             self.log(f"ERROR: save failed: {e}")
 
     # ---------- "Saved" screen ----------
+    # ---------- network profile (MCI / home) ----------
+    NET_LABELS = {
+        "Default (all networks)": "",
+        "MCI (Hamrah-e-Avval)": "mci",
+        "Irancell": "irancell",
+        "Rightel": "rightel",
+        "Home internet (ADSL / Fiber)": "home",
+    }
+
+    def detect_net(self):
+        """Android only: Wi-Fi / ethernet -> home internet; mobile data -> operator from the SIM's MCC-MNC."""
+        if platform != "android":
+            return ""
+        try:
+            from jnius import autoclass  # type: ignore
+            ctx = autoclass("org.kivy.android.PythonActivity").mActivity
+            Context = autoclass("android.content.Context")
+            ni = ctx.getSystemService(Context.CONNECTIVITY_SERVICE).getActiveNetworkInfo()
+            if ni is None:
+                return ""
+            if ni.getType() in (1, 9):          # WIFI, ETHERNET
+                return "home"
+            op = str(ctx.getSystemService(Context.TELEPHONY_SERVICE).getNetworkOperator() or "")
+            for key, p in core.NET_PRESETS.items():
+                if p.get("plmn") and op.startswith(p["plmn"]):
+                    return key
+        except Exception as e:
+            self.log(f"Network detection failed: {e}")
+        return ""
+
+    def resolve_net(self):
+        try:
+            text = self.sm.get_screen("build").ids.sp_net.text
+        except Exception:
+            return ""
+        if text.startswith("Auto"):
+            key = self.detect_net()
+            self.log("Detected network: " + (core.NET_PRESETS[key]["label"] if key else "unknown - using the default list"))
+            return key
+        return self.NET_LABELS.get(text, "")
+
     # ---------- account / proxy toggles ----------
     def on_pick_account(self, text):
         if text in self._acc_values:
@@ -1858,7 +2012,8 @@ class AminiumApp(App):
         rec = items[index]
         content = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(10))
         content.add_widget(Label(text="Each IP is tested against this panel's worker from this network; only working ones are written. "
-                                      "If none works, the panel stays unchanged.", color=C_TEXT, font_size="12sp",
+                                      "If none works, the panel stays unchanged.\nThe IPs go into the profile of the network chosen in Build "
+                                      "(Auto-detect by default), so be on that network now.", color=C_TEXT, font_size="12sp",
                                  halign="center", valign="middle"))
         b_new = RoundButton(text=f"Use the new Radar IPs ({len(self.ips)})")
         b_old = RoundButton(text=f"Re-test the saved IPs ({len(rec.get('ips', []))})", kind="soft")
@@ -1872,12 +2027,15 @@ class AminiumApp(App):
             pop.dismiss()
             if not pool:
                 return self.toast("No IPs - run the Radar first")
+            net_key = self.resolve_net()
             self.toast("Updating IPs - watch the log bar")
 
             def work():
                 try:
+                    bb = self.sm.get_screen("build").ids
                     new = core.update_deployment_ips(dict(rec), pool, self.scan_form(), self.log,
-                                                     stage=lambda t, f: self.log(t))
+                                                     stage=lambda t, f: self.log(t), net=net_key,
+                                                     frag=core.valid_frag(bb.f_frag_len.text.strip(), bb.f_frag_int.text.strip()))
                     core.replace_deployment(index, new)
                     self.log(f"Done: {len(new['ips'])} working IPs now in the panel.")
                     self.toast(f"{len(new['ips'])} IPs updated")
