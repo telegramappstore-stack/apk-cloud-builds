@@ -1,22 +1,37 @@
 [app]
-title = ProxyScout
-package.name = proxyscout
-package.domain = org.proxyscout
+title = Aminium Studio
+package.name = aminiumstudio
+package.domain = org.aminium
+
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
-version = 1.1
-requirements = python3,kivy==2.3.0,certifi
+source.include_exts = py,png,jpg,kv,atlas,zip,json,txt
+# put aminium-pages.zip next to main.py before building so it ends up bundled in the APK
+source.include_patterns = aminium-pages.zip
+
+version = 1.0.0
+
+requirements = python3,kivy==2.3.0,requests,qrcode,certifi,pillow,pyjnius
+
 orientation = portrait
 fullscreen = 0
-android.permissions = INTERNET,FOREGROUND_SERVICE
-android.api = 33
+
+icon.filename = %(source.dir)s/icon.png
+
+android.permissions = INTERNET,ACCESS_NETWORK_STATE
+
+# Android 14 = API level 34
+android.api = 34
 android.minapi = 24
 android.ndk = 25b
-android.archs = arm64-v8a
+android.archs = arm64-v8a,armeabi-v7a
+
+# release builds need these, see step_card below for how to use them
+#android.release_artifact = aab
+#android.keystore = %(source.dir)s/release.keystore
+#android.keyalias = aminium
+
+android.allow_backup = True
 android.accept_sdk_license = True
-android.add_src = java
-android.add_libs_arm64_v8a = libs/arm64-v8a/*.so
-p4a.branch = v2024.01.21
 
 [buildozer]
 log_level = 2
