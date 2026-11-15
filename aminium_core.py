@@ -66,6 +66,9 @@ from kivy.app import App
 
 def app_dir() -> Path:
     """Writable app-private storage: Android's user_data_dir on-device, this file's folder on desktop."""
+    priv = os.environ.get("ANDROID_PRIVATE")  # set by python-for-android, valid even before the App exists
+    if priv:
+        return Path(priv)
     try:
         app = App.get_running_app()
         if app is not None:
@@ -86,6 +89,8 @@ TOKEN_TEMPLATE = [
     {"key": "workers_scripts", "type": "edit"},
     {"key": "account_settings", "type": "read"},
     {"key": "account_analytics", "type": "read"},
+    {"key": "zone", "type": "read"},
+    {"key": "dns", "type": "edit"},
 ]
 TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens"
 
@@ -631,8 +636,24 @@ def net_info(timeout: float = 4.0) -> dict:
 # ════════════════════════════════════════════════════════════════════════════
 #  PART 2 - Cloudflare API client (taken unchanged from aminium_deployer.py)
 # ════════════════════════════════════════════════════════════════════════════
+LOWER = string.ascii_lowercase + string.digits
+
+
 def rnd(n=16, alphabet=string.ascii_letters + string.digits) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+def rnd_name() -> str:
+    """Random project name: starts with a letter, lowercase letters/digits only (valid for Workers/Pages)."""
+    return secrets.choice(string.ascii_lowercase) + rnd(9, LOWER)
+
+
+# search-depth presets used by the scan screen
+DEPTH = {
+    "Quick":  {"count": 200,  "threads": 24, "target": 15},
+    "Normal": {"count": 600,  "threads": 32, "target": 40},
+    "Deep":   {"count": 1500, "threads": 48, "target": 100},
+}
 
 
 class CFError(Exception):
@@ -992,6 +1013,7 @@ class ScanJob:
         self.cert_fails = 0
         self.diag: dict | None = None
         self.diag_on_empty = True
+        self.recent = collections.deque(maxlen=80)   # (ip, ok) of the latest probes - drives the radar
 
     def log(self, msg):
         self._log(msg)
@@ -1001,7 +1023,8 @@ class ScanJob:
             end = self.finished or time.time()
             return {"phase": self.phase, "tested": self.tested, "total": self.total,
                     "found": len(self.results), "elapsed": round(end - self.started, 1) if self.started else 0,
-                    "results": list(self.results), "reasons": dict(self.reasons)}
+                    "results": list(self.results), "reasons": dict(self.reasons),
+                    "recent": list(self.recent)}
 
     def _worker(self, q: queue.PriorityQueue):
         cfg = self.cfg
@@ -1018,6 +1041,7 @@ class ScanJob:
                 res, reason = scan_ip(ip, cfg, self.stop)
                 with self.lock:
                     self.tested += 1
+                    self.recent.append((ip, bool(res)))
                     if res:
                         self.results.append(res)
                         if cfg.target and len(self.results) >= cfg.target:
