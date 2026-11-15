@@ -34,6 +34,7 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.screenmanager import Screen, SlideTransition
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
@@ -368,6 +369,24 @@ KV = r"""
             kind: "danger"
             height: dp(40)
             on_release: app.delete_deployment_prompt(root.index)
+    BoxLayout:
+        size_hint_y: None
+        height: dp(40)
+        spacing: dp(8)
+        RoundButton:
+            text: "Update IPs"
+            height: dp(40)
+            on_release: app.update_ips_prompt(root.index)
+        RoundButton:
+            text: "Open panel"
+            kind: "soft"
+            height: dp(40)
+            on_release: app.open_panel_of(root.index)
+        RoundButton:
+            text: "Copy sub link"
+            kind: "soft"
+            height: dp(40)
+            on_release: app.copy_sub_of(root.index)
 
 <LogBar>:
     size_hint_y: None
@@ -586,6 +605,7 @@ FloatLayout:
                 RoundSpinner:
                     id: sp_account
                     text: "(verify token first)"
+                    on_text: app.on_pick_account(self.text)
 
 
 <ScanScreen>:
@@ -723,6 +743,11 @@ FloatLayout:
                 RoundInput:
                     id: f_proxy
                 RoundButton:
+                    id: btn_autoproxy
+                    text: "Auto free proxies on connection error: ON"
+                    kind: "soft"
+                    on_release: app.toggle_autoproxy()
+                RoundButton:
                     text: "Re-roll random values"
                     kind: "soft"
                     on_release: app.roll_all()
@@ -801,7 +826,11 @@ FloatLayout:
             H1:
                 text: "Saved configs"
             Muted:
-                text: "Everything you built on this phone. Load one back into the Configs tab, rename it, or remove it from the list."
+                text: "Everything you built on this phone. Load one back into the Configs tab, update its clean IPs, rename it, or remove it."
+            RoundButton:
+                text: "Databases (D1) - view / delete"
+                kind: "soft"
+                on_release: app.open_db_manager()
         ScrollView:
             bar_width: dp(3)
             BoxLayout:
@@ -1138,7 +1167,11 @@ class AminiumApp(App):
         self.token = self.cfg.get("token", "")
         self.email = self.cfg.get("email", "")
         self.accounts = []
+        self.account_id = self.cfg.get("account_id")
+        self._acc_values = []
         self.token_ok = False
+        core.set_auto_proxy(self.cfg.get("auto_proxy", True))
+        core.set_proxy_logger(lambda s: self.log(s))
         self.job = None
         self.ips = []
         self.rec = None
@@ -1282,6 +1315,7 @@ class AminiumApp(App):
             self.set_status(t.ids.lbl_token_state, "Token loaded from this phone. Press 'Save & verify'.")
         self.roll_all()
         self.sm.get_screen("build").ids.f_proxy.text = self.cfg.get("panel_proxy", "")
+        self._paint_autoproxy()
 
     # ---------- step 1: token ----------
     def open_token_page(self, manual=False):
@@ -1316,17 +1350,24 @@ class AminiumApp(App):
             try:
                 cf = core.CF(self.token, self.log, self.email)
                 info = cf.verify()
-                accs = cf.accounts()
-                if not accs:
+                all_accs = cf.accounts()
+                if not all_accs:
                     raise core.CFError("No account visible to this token (add 'Account Settings: Read').")
+                accs = cf.usable_accounts(all_accs)
                 self.accounts = accs
                 vals = [f"{a['name']} ({a['id'][:6]})" for a in accs]
+                self._acc_values = vals
+                saved = self.cfg.get("account_id")
+                pick = next((i for i, a in enumerate(accs) if a["id"] == saved), 0)
+                self.account_id = accs[pick]["id"]
 
                 def ui(*_):
                     t.ids.sp_account.values = vals
-                    t.ids.sp_account.text = vals[0]
+                    t.ids.sp_account.text = vals[pick]
                     self.token_ok = True
-                    self.set_status(t.ids.lbl_token_state, f"Token is valid ({info.get('status')}). Continue to the Radar tab.", "ok")
+                    self.set_status(t.ids.lbl_token_state,
+                                    f"Token is valid ({info.get('status')}). {len(accs)} of {len(all_accs)} account(s) usable - "
+                                    "pick the one to build in, then continue to the Radar tab.", "ok")
                     self.save_cfg()
                     self.toast("Token verified")
                 Clock.schedule_once(ui, 0)
@@ -1342,6 +1383,8 @@ class AminiumApp(App):
     def on_forget_token(self):
         self.token, self.email, self.token_ok = "", "", False
         self.accounts = []
+        self.account_id = None
+        self._acc_values = []
         t = self.sm.get_screen("token")
         t.ids.f_token.text = ""
         t.ids.f_email.text = ""
@@ -1592,7 +1635,7 @@ class AminiumApp(App):
             "pass": b.ids.f_pass.text, "ws_path": self._ws_path, "cron": self._cron, "uuid": self._uuid,
             "decoy": "", "tg_token": "", "tg_secret": "", "tg_admins": "", "domain": b.ids.f_domain.text.strip().lower(),
             "d1": True, "verify_ws": True, "scan": self.scan_form(), "ips": list(self.ips), "keep": 100, "tls": tls,
-            "proxy": b.ids.f_proxy.text.strip(),
+            "proxy": b.ids.f_proxy.text.strip(), "auto_proxy": bool(self.cfg.get("auto_proxy", True)),
         }
         self.cfg["panel_proxy"] = form["proxy"]
         self.save_cfg()
@@ -1618,7 +1661,7 @@ class AminiumApp(App):
 
         def work():
             try:
-                result = core.run_build(self.token, self.email, self.accounts, None, project, source, panel, mode,
+                result = core.run_build(self.token, self.email, self.accounts, self.account_id, project, source, panel, mode,
                                         form, self.log, stage)
                 self.rec, self.out = result["rec"], result["out"]
                 self.deployments = core.add_deployment(self.rec)
@@ -1681,6 +1724,172 @@ class AminiumApp(App):
             self.log(f"ERROR: save failed: {e}")
 
     # ---------- "Saved" screen ----------
+    # ---------- account / proxy toggles ----------
+    def on_pick_account(self, text):
+        if text in self._acc_values:
+            i = self._acc_values.index(text)
+            if i < len(self.accounts):
+                self.account_id = self.accounts[i]["id"]
+                self.cfg["account_id"] = self.account_id
+                self.save_cfg()
+                self.log(f"Account selected: {text}")
+
+    def _paint_autoproxy(self):
+        on = bool(self.cfg.get("auto_proxy", True))
+        try:
+            self.sm.get_screen("build").ids.btn_autoproxy.text = "Auto free proxies on connection error: " + ("ON" if on else "OFF")
+        except Exception:
+            pass
+
+    def toggle_autoproxy(self):
+        self.cfg["auto_proxy"] = not bool(self.cfg.get("auto_proxy", True))
+        core.set_auto_proxy(self.cfg["auto_proxy"])
+        self.save_cfg()
+        self._paint_autoproxy()
+
+    # ---------- databases (D1) ----------
+    def _work_account(self):
+        return self.account_id or core.selected_account_id(self.accounts, None)
+
+    def open_db_manager(self):
+        if not (self.token and self.accounts):
+            return self.toast("Verify your token in step 1 first")
+        acc = self._work_account()
+        content = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(10))
+        info = Label(text="Loading databases...", color=C_MUTED, font_size="13sp", size_hint_y=None, height=dp(36),
+                     halign="left", valign="middle")
+        info.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+        content.add_widget(info)
+        sv = ScrollView(bar_width=dp(3))
+        box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
+        box.bind(minimum_height=box.setter("height"))
+        sv.add_widget(box)
+        content.add_widget(sv)
+        close = RoundButton(text="Close", kind="soft")
+        content.add_widget(close)
+        popup = self.make_popup("D1 databases", content, (0.94, 0.86))
+        close.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+
+        def load():
+            try:
+                cf = core.CF(self.token, self.log, self.email)
+                dbs = cf.d1_list(acc)
+            except Exception as e:
+                self.log(f"Could not list databases: {e}")
+                Clock.schedule_once(lambda dt: setattr(info, "text", f"Could not list databases: {e}"), 0)
+                return
+            used = {r.get("d1_id"): (r.get("label") or r.get("project")) for r in core.load_deployments() if r.get("d1_id")}
+
+            def ui(*_):
+                box.clear_widgets()
+                info.text = f"{len(dbs)} database(s) in this account. The free plan allows only a few (usually 10)."
+                if not dbs:
+                    box.add_widget(Label(text="No databases.", color=C_MUTED, size_hint_y=None, height=dp(40)))
+                for db in dbs:
+                    uid = db.get("uuid", "")
+                    tag = f"\nused by: {used[uid]}" if uid in used else "\nnot used by any saved config"
+                    size = db.get("file_size")
+                    sz = f"  |  {int(size) // 1024} KB" if isinstance(size, (int, float)) else ""
+                    row = Card()
+                    lab = Label(text=f"{db.get('name', '?')}\n{uid[:8]}...  {str(db.get('created_at', ''))[:10]}{sz}{tag}",
+                                color=C_TEXT, font_size="12sp", halign="left", valign="middle", size_hint_y=None)
+                    lab.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+                    lab.bind(texture_size=lambda w, ts: setattr(w, "height", ts[1] + dp(4)))
+                    row.add_widget(lab)
+                    bt = RoundButton(text="Delete", kind="danger", height=dp(40))
+                    bt.bind(on_release=lambda _b, d=db: self._confirm_db_delete(cf, acc, d, used, popup))
+                    row.add_widget(bt)
+                    box.add_widget(row)
+            Clock.schedule_once(ui, 0)
+        threading.Thread(target=load, daemon=True).start()
+
+    def _confirm_db_delete(self, cf, acc, db, used, parent_popup):
+        uid = db.get("uuid", "")
+        warn = ("\nWARNING: a saved panel uses it - that panel will stop working." if uid in used else "")
+        content = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(12))
+        content.add_widget(Label(text=f"Delete database \"{db.get('name')}\" permanently?{warn}", color=C_TEXT,
+                                 font_size="13sp", halign="center"))
+        row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        yes = RoundButton(text="Delete", kind="danger")
+        no = RoundButton(text="Cancel", kind="soft")
+        row.add_widget(yes)
+        row.add_widget(no)
+        content.add_widget(row)
+        pop = self.make_popup("Confirm", content, (0.88, 0.4))
+        no.bind(on_release=lambda *_: pop.dismiss())
+
+        def go(*_):
+            pop.dismiss()
+
+            def work():
+                try:
+                    cf.d1_delete(acc, uid)
+                    core.forget_d1(uid)
+                    self.toast("Database deleted")
+                except Exception as e:
+                    self.log(f"Delete failed: {e}")
+                Clock.schedule_once(lambda dt: (parent_popup.dismiss(), self.open_db_manager()), 0)
+            threading.Thread(target=work, daemon=True).start()
+        yes.bind(on_release=go)
+        pop.open()
+
+    # ---------- saved configs: extra actions ----------
+    def open_panel_of(self, index):
+        items = core.load_deployments()
+        index = int(index)
+        if 0 <= index < len(items):
+            r = items[index]
+            self.open_url(f"{r['base']}{r.get('panel_path', '/panel')}")
+
+    def copy_sub_of(self, index):
+        items = core.load_deployments()
+        index = int(index)
+        if 0 <= index < len(items) and items[index].get("sub"):
+            from kivy.core.clipboard import Clipboard
+            Clipboard.copy(items[index]["sub"])
+            self.toast("Subscription link copied")
+
+    def update_ips_prompt(self, index):
+        items = core.load_deployments()
+        index = int(index)
+        if not (0 <= index < len(items)):
+            return
+        rec = items[index]
+        content = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(10))
+        content.add_widget(Label(text="Each IP is tested against this panel's worker from this network; only working ones are written. "
+                                      "If none works, the panel stays unchanged.", color=C_TEXT, font_size="12sp",
+                                 halign="center", valign="middle"))
+        b_new = RoundButton(text=f"Use the new Radar IPs ({len(self.ips)})")
+        b_old = RoundButton(text=f"Re-test the saved IPs ({len(rec.get('ips', []))})", kind="soft")
+        b_no = RoundButton(text="Cancel", kind="ghost")
+        for b in (b_new, b_old, b_no):
+            content.add_widget(b)
+        pop = self.make_popup("Update clean IPs", content, (0.9, 0.55))
+        b_no.bind(on_release=lambda *_: pop.dismiss())
+
+        def run(pool):
+            pop.dismiss()
+            if not pool:
+                return self.toast("No IPs - run the Radar first")
+            self.toast("Updating IPs - watch the log bar")
+
+            def work():
+                try:
+                    new = core.update_deployment_ips(dict(rec), pool, self.scan_form(), self.log,
+                                                     stage=lambda t, f: self.log(t))
+                    core.replace_deployment(index, new)
+                    self.log(f"Done: {len(new['ips'])} working IPs now in the panel.")
+                    self.toast(f"{len(new['ips'])} IPs updated")
+                except Exception as e:
+                    self.log(f"Update failed: {e}")
+                    self.toast("Update failed - see the log")
+                Clock.schedule_once(lambda dt: self.refresh_manage_list(), 0)
+            threading.Thread(target=work, daemon=True).start()
+        b_new.bind(on_release=lambda *_: run(list(self.ips)))
+        b_old.bind(on_release=lambda *_: run(list(rec.get("ips", []))))
+        pop.open()
+
     def refresh_manage_list(self):
         m = self.sm.get_screen("manage")
         box = m.ids.manage_list
@@ -1745,7 +1954,7 @@ class AminiumApp(App):
             return
         content = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(12))
         name = items[index].get("label") or items[index].get("project", "")
-        content.add_widget(Label(text=f"Remove \"{name}\" from this list?\n(The Cloudflare project itself is NOT touched.)",
+        content.add_widget(Label(text=f"Remove \"{name}\" from this list?\n(The first button keeps the Cloudflare project; the last one also deletes it from Cloudflare.)",
                                  color=C_TEXT, font_size="13sp", halign="center"))
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         b_yes = RoundButton(text="Delete", kind="danger")
@@ -1753,12 +1962,25 @@ class AminiumApp(App):
         row.add_widget(b_yes)
         row.add_widget(b_no)
         content.add_widget(row)
-        popup = self.make_popup("Confirm delete", content, (0.88, 0.38))
+        b_all = RoundButton(text="Delete + remove from Cloudflare (project, D1, KV)", kind="danger")
+        content.add_widget(b_all)
+        popup = self.make_popup("Confirm delete", content, (0.9, 0.5))
 
         def do_delete(*_):
             core.delete_deployment(items, index, log=self.log, also_remove_remote=False)
             popup.dismiss()
             self.refresh_manage_list()
+
+        def do_delete_all(*_):
+            popup.dismiss()
+            if not self.token:
+                return self.toast("Verify your token first")
+
+            def work():
+                core.delete_deployment(items, index, token=self.token, email=self.email, log=self.log, also_remove_remote=True)
+                Clock.schedule_once(lambda dt: self.refresh_manage_list(), 0)
+            threading.Thread(target=work, daemon=True).start()
+        b_all.bind(on_release=do_delete_all)
         b_yes.bind(on_release=do_delete)
         b_no.bind(on_release=lambda *_: popup.dismiss())
         popup.open()
