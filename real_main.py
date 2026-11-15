@@ -1,1428 +1,1681 @@
-"""Amizoo - finds proxies / V2Ray configs, verifies them for real, and connects through them as a VPN
-(Android VpnService + bundled Xray core). On a PC it runs with a simulated connection."""
+#!/usr/bin/env python3
+"""
+Aminium Studio - Kivy / Android app.
+
+Flow: Token -> Radar (clean IPs) -> Build -> Configs, plus "Saved" (everything built on this phone).
+
+All networking / scanning / Cloudflare / config logic lives in aminium_core.py; this file is only UI:
+  * animated splash screen
+  * light, modern look (cards, gradient header, rounded inputs, bottom navigation)
+  * live RADAR animation while scanning for clean IPs (found IPs show up as glowing blips)
+  * one-tap "Create API token" button that opens Cloudflare's token page with every permission
+    Aminium needs already selected
+"""
 import json
+import math
 import os
-import sys
+import re
 import threading
-import time
+import uuid as uuidlib
+import zlib
+from pathlib import Path
 
 from kivy.animation import Animation
 from kivy.app import App
-from kivy.factory import Factory
 from kivy.clock import Clock
-from kivy.core.clipboard import Clipboard
 from kivy.core.window import Window
-from kivy.graphics import Color, Ellipse, Line, RoundedRectangle
+from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle, Triangle
+from kivy.graphics.texture import Texture
 from kivy.lang import Builder
 from kivy.metrics import dp
 from kivy.properties import BooleanProperty, ListProperty, NumericProperty, StringProperty
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
-from kivy.uix.modalview import ModalView
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.screenmanager import FadeTransition, Screen, SlideTransition
+from kivy.uix.popup import Popup
+from kivy.uix.screenmanager import Screen, SlideTransition
+from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 from kivy.utils import platform
 
-import engine as en
-import ui_kit
-from ui_kit import THEMES, FadeLabel, SplashScreen, ThemeSwatch  # noqa: F401  (registered for KV)
-import proxycore as pc
-import xraytest as xt
+import aminium_core as core
 
-MAX_TEST = 400           # servers tested per scan
-V2_VERIFY_MAX = 500      # V2Ray configs verified with the Xray core per scan (my whole subscription)
-MAX_SHOWN = 80
-HIST = 60                # seconds in the speed graph
-BG = (0.955, 0.965, 0.985, 1)
-GREEN, AMBER, RED = [0.10, 0.68, 0.42, 1], [0.93, 0.62, 0.05, 1], [0.90, 0.25, 0.30, 1]
-GREY, BLUE, BLUE_DN = [0.55, 0.60, 0.72, 1], [0.13, 0.45, 0.96, 1], [0.09, 0.36, 0.82, 1]
-SURF2, LINE = [0.91, 0.93, 0.98, 1], [0.87, 0.90, 0.95, 1]
+# ───────────────────────────── Android runtime permissions ─────────────────────────────
+if platform == "android":
+    try:
+        from android.permissions import request_permissions, Permission  # type: ignore
+        request_permissions([Permission.INTERNET, Permission.ACCESS_NETWORK_STATE])
+    except Exception:
+        pass
 
+# ───────────────────────────── palette ─────────────────────────────
+C_PRIMARY = (0.31, 0.275, 0.90, 1)
+C_CYAN = (0.02, 0.71, 0.83, 1)
+C_TEXT = (0.06, 0.09, 0.16, 1)
+C_MUTED = (0.39, 0.45, 0.55, 1)
+C_OK = (0.09, 0.64, 0.29, 1)
+C_ERR = (0.86, 0.20, 0.20, 1)
+
+TABS = [
+    ("token", "Token", "Step 1  -  Connect Cloudflare"),
+    ("scan", "Radar", "Step 2  -  Find clean IPs"),
+    ("build", "Build", "Step 3  -  Deploy your panel"),
+    ("output", "Configs", "Step 4  -  Your configs"),
+    ("manage", "Saved", "Everything you built on this phone"),
+]
+
+FORMATS_UI = [
+    ("auto", "Auto (recommended)", ""),
+    ("xray", "Xray + fragment", "?format=xray"),
+    ("clash", "Clash", "?format=clash"),
+    ("singbox", "sing-box", "?format=singbox"),
+    ("patt", "Patt", "?format=patt"),
+    ("v2ray", "Plain links", "?format=base64"),
+]
+
+
+def gradient_texture(c1, c2, vertical=True):
+    """Tiny 2-pixel texture that the GPU stretches into a smooth gradient."""
+    size = (1, 2) if vertical else (2, 1)
+    tex = Texture.create(size=size, colorfmt="rgba")
+    first, second = (c2, c1) if vertical else (c1, c2)   # texture row 0 is the bottom
+    buf = bytes(int(max(0, min(1, v)) * 255) for v in (*first, *second))
+    tex.blit_buffer(buf, colorfmt="rgba", bufferfmt="ubyte")
+    tex.mag_filter = "linear"
+    tex.min_filter = "linear"
+    return tex
+
+
+# ───────────────────────────── KV (layout + styles) ─────────────────────────────
 KV = r"""
 #:import dp kivy.metrics.dp
-#:import sp kivy.metrics.sp
+#:set C_PRIMARY (0.31, 0.275, 0.90, 1)
+#:set C_CYAN (0.02, 0.71, 0.83, 1)
+#:set C_TEXT (0.06, 0.09, 0.16, 1)
+#:set C_MUTED (0.39, 0.45, 0.55, 1)
 
-<LeftLabel@Label>:
-    text_size: self.width, None
-    halign: 'left'
-    valign: 'middle'
-
-<WrapLabel@Label>:
-    text_size: self.width, None
+<H1@Label>:
+    bold: True
+    font_size: "18sp"
+    color: C_TEXT
     size_hint_y: None
-    height: self.texture_size[1] + dp(4)
-    halign: 'left'
+    height: self.texture_size[1] + dp(2)
+    halign: "left"
+    valign: "middle"
+    text_size: self.width, None
+
+<Body@Label>:
+    font_size: "13sp"
+    color: 0.20, 0.25, 0.35, 1
+    size_hint_y: None
+    height: self.texture_size[1] + dp(2)
+    halign: "left"
+    valign: "top"
+    text_size: self.width, None
+
+<Muted@Label>:
+    font_size: "12sp"
+    color: C_MUTED
+    size_hint_y: None
+    height: self.texture_size[1] + dp(2)
+    halign: "left"
+    valign: "top"
+    text_size: self.width, None
+
+<FieldLabel@Label>:
+    font_size: "12sp"
+    bold: True
+    color: C_MUTED
+    size_hint_y: None
+    height: dp(22)
+    halign: "left"
+    valign: "bottom"
+    text_size: self.width, self.height
+
+<Page>:
+    orientation: "vertical"
+    padding: dp(14)
+    spacing: dp(12)
+    size_hint_y: None
+    height: self.minimum_height
 
 <Card>:
-    bg: app.t_surf
+    orientation: "vertical"
+    padding: dp(16)
+    spacing: dp(10)
+    size_hint_y: None
+    height: self.minimum_height
     canvas.before:
         Color:
-            rgba: self.bg
+            rgba: 0.06, 0.09, 0.20, 0.06
+        RoundedRectangle:
+            pos: self.x, self.y - dp(2)
+            size: self.size
+            radius: [dp(20)]
+        Color:
+            rgba: 1, 1, 1, 1
         RoundedRectangle:
             pos: self.pos
             size: self.size
-            radius: self.radius
-        Color:
-            rgba: app.t_line
-        Line:
-            rounded_rectangle: self.x, self.y, self.width, self.height, self.radius[0]
-            width: 1
+            radius: [dp(20)]
 
-<PillButton>:
-    bg: app.t_acc
-    bg_down: app.t_acc_dn
-    background_normal: ''
-    background_down: ''
-    background_color: 0, 0, 0, 0
+<RoundButton>:
+    size_hint_y: None
+    height: dp(48)
     bold: True
+    font_size: "14sp"
     color: self.fg
-    font_size: sp(14)
     canvas.before:
         Color:
-            rgba: self.bg if self.state == 'normal' else self.bg_down
+            rgba: self.bg_color
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(14)]
+
+<RoundInput>:
+    multiline: False
+    size_hint_y: None
+    height: dp(46)
+    background_normal: ""
+    background_active: ""
+    background_disabled_normal: ""
+    background_color: 0, 0, 0, 0
+    foreground_color: C_TEXT
+    cursor_color: C_PRIMARY
+    hint_text_color: 0.6, 0.65, 0.75, 1
+    selection_color: 0.31, 0.275, 0.90, 0.25
+    font_size: "14sp"
+    padding: [dp(14), max(dp(10), (self.height - self.line_height) / 2)]
+    canvas.before:
+        Color:
+            rgba: (0.93, 0.94, 1, 1) if self.focus else (0.945, 0.953, 0.973, 1)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(12)]
+        Color:
+            rgba: C_PRIMARY if self.focus else (0.88, 0.90, 0.94, 1)
+        Line:
+            rounded_rectangle: self.x, self.y, self.width, self.height, dp(12)
+            width: dp(1.2) if self.focus else dp(1)
+
+<RoundSpinner>:
+    size_hint_y: None
+    height: dp(46)
+    background_normal: ""
+    background_down: ""
+    background_color: 0, 0, 0, 0
+    color: C_TEXT
+    font_size: "14sp"
+    halign: "left"
+    valign: "middle"
+    text_size: self.width - dp(46), self.height
+    padding_x: dp(14)
+    canvas.before:
+        Color:
+            rgba: 0.945, 0.953, 0.973, 1
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(12)]
+        Color:
+            rgba: 0.88, 0.90, 0.94, 1
+        Line:
+            rounded_rectangle: self.x, self.y, self.width, self.height, dp(12)
+            width: dp(1)
+        Color:
+            rgba: C_PRIMARY
+        Line:
+            points: self.right - dp(28), self.center_y + dp(3), self.right - dp(21), self.center_y - dp(4), self.right - dp(14), self.center_y + dp(3)
+            width: dp(1.5)
+
+<SpinnerOption>:
+    background_normal: ""
+    background_down: ""
+    background_color: (0.93, 0.94, 1, 1) if self.state == "down" else (1, 1, 1, 1)
+    color: C_TEXT
+    size_hint_y: None
+    height: dp(44)
+    font_size: "14sp"
+
+<SoftBar>:
+    size_hint_y: None
+    height: dp(8)
+    canvas:
+        Color:
+            rgba: 0.90, 0.92, 0.96, 1
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(4)]
+        Color:
+            rgba: C_PRIMARY
+        RoundedRectangle:
+            pos: self.pos
+            size: max(self.height, self.width * min(1.0, self.value)), self.height
+            radius: [dp(4)]
+
+<StatBox>:
+    orientation: "vertical"
+    padding: dp(8)
+    canvas.before:
+        Color:
+            rgba: 1, 1, 1, 1
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(16)]
+    Label:
+        text: root.value
+        bold: True
+        font_size: "20sp"
+        color: root.accent
+    Label:
+        text: root.caption
+        font_size: "10sp"
+        bold: True
+        color: C_MUTED
+
+<NavTab>:
+    font_size: "12sp"
+    bold: self.active
+    color: C_PRIMARY if self.active else C_MUTED
+    canvas.before:
+        Color:
+            rgba: (0.31, 0.275, 0.90, 0.10) if self.active else (0, 0, 0, 0)
+        RoundedRectangle:
+            pos: self.x + dp(6), self.y + dp(8)
+            size: self.width - dp(12), self.height - dp(16)
+            radius: [dp(14)]
+
+<IpRow>:
+    size_hint_y: None
+    height: dp(54)
+    padding: dp(12), dp(6)
+    spacing: dp(8)
+    canvas.before:
+        Color:
+            rgba: 0.945, 0.953, 0.973, 1
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(12)]
+    BoxLayout:
+        orientation: "vertical"
+        Label:
+            text: root.ip
+            bold: True
+            font_size: "14sp"
+            color: C_TEXT
+            halign: "left"
+            valign: "bottom"
+            text_size: self.size
+        Label:
+            text: root.meta
+            font_size: "11sp"
+            color: C_MUTED
+            halign: "left"
+            valign: "top"
+            text_size: self.size
+    Label:
+        text: str(root.score)
+        bold: True
+        font_size: "15sp"
+        size_hint_x: None
+        width: dp(46)
+        color: (0.09, 0.64, 0.29, 1) if root.score >= 70 else ((0.85, 0.55, 0.05, 1) if root.score >= 40 else (0.86, 0.20, 0.20, 1))
+        canvas.before:
+            Color:
+                rgba: (0.86, 0.97, 0.89, 1) if root.score >= 70 else ((1, 0.95, 0.82, 1) if root.score >= 40 else (1, 0.88, 0.88, 1))
+            RoundedRectangle:
+                pos: self.x, self.y + dp(8)
+                size: self.width, self.height - dp(16)
+                radius: [dp(10)]
+
+<DeployRow>:
+    BoxLayout:
+        size_hint_y: None
+        height: dp(22)
+        Label:
+            text: root.title
+            bold: True
+            font_size: "15sp"
+            color: C_TEXT
+            halign: "left"
+            valign: "middle"
+            shorten: True
+            text_size: self.size
+    Muted:
+        text: root.subtitle
+    BoxLayout:
+        size_hint_y: None
+        height: dp(40)
+        spacing: dp(8)
+        RoundButton:
+            text: "Load"
+            height: dp(40)
+            on_release: app.load_deployment(root.index)
+        RoundButton:
+            text: "Rename"
+            kind: "soft"
+            height: dp(40)
+            on_release: app.rename_deployment_prompt(root.index)
+        RoundButton:
+            text: "Delete"
+            kind: "danger"
+            height: dp(40)
+            on_release: app.delete_deployment_prompt(root.index)
+
+<LogBar>:
+    size_hint_y: None
+    height: dp(30)
+    padding: dp(14), 0
+    canvas.before:
+        Color:
+            rgba: 0.93, 0.94, 0.98, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    Label:
+        id: lbl_log
+        text: root.last
+        font_size: "11sp"
+        color: C_MUTED
+        halign: "left"
+        valign: "middle"
+        shorten: True
+        text_size: self.size
+
+<ToastLabel>:
+    size_hint: None, None
+    size: self.texture_size[0] + dp(32), self.texture_size[1] + dp(18)
+    pos_hint: {"center_x": .5, "y": .16}
+    font_size: "13sp"
+    color: 1, 1, 1, 1
+    canvas.before:
+        Color:
+            rgba: 0.06, 0.09, 0.16, 0.92
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(16)]
 
-<GhostButton>:
-    bg: app.t_surf2
-    bg_down: app.t_line
-    fg: app.t_txt
-
-<Pill>:
-    bold: True
-    font_size: sp(13)
-    color: 1, 1, 1, 1
-    canvas.before:
-        Color:
-            rgba: self.bg
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(11)]
-
-<Chip@ToggleButton>:
-    background_normal: ''
-    background_down: ''
-    background_color: 0, 0, 0, 0
-    bold: True
-    font_size: sp(13)
-    allow_no_selection: False
-    color: (1, 1, 1, 1) if self.state == 'down' else app.t_muted
-    canvas.before:
-        Color:
-            rgba: app.t_acc if self.state == 'down' else app.t_surf2
-        RoundedRectangle:
-            pos: self.pos
-            size: self.size
-            radius: [dp(13)]
-
-<Stat>:
-    orientation: 'vertical'
+<Radar>:
+    size_hint_y: None
+    height: min(self.width, dp(340))
     Label:
-        text: root.value
-        font_size: sp(19)
+        text: root.title
         bold: True
-        color: root.accent
+        font_size: "13sp"
+        color: 0.55, 1, 0.88, 1
+        size_hint: None, None
+        size: self.texture_size
+        pos_hint: {"center_x": .5, "top": .975}
     Label:
-        text: root.caption
-        font_size: sp(11)
-        color: app.t_muted
-
-<ServerRow>:
-    size_hint_y: None
-    height: dp(66)
-    padding: dp(16), dp(8), dp(12), dp(8)
-    spacing: dp(10)
-    bg: app.t_surf2 if self.state == 'down' else app.t_surf
-    Image:
-        source: root.flag
+        text: root.subtitle
+        font_size: "12sp"
+        color: 0.70, 0.80, 0.90, 1
         size_hint: None, None
-        size: dp(30), dp(21)
-        pos_hint: {'center_y': .5}
-        opacity: 1 if root.flag else 0
+        size: self.texture_size
+        pos_hint: {"center_x": .5, "y": .03}
+
+<Ring>:
+    size_hint: None, None
+    size: dp(150), dp(150)
+    pos_hint: {"center_x": .5}
+    Label:
+        text: root.text
+        bold: True
+        font_size: "26sp"
+        color: C_TEXT
+
+FloatLayout:
     BoxLayout:
-        orientation: 'vertical'
-        LeftLabel:
-            text: root.title
-            font_size: sp(16)
-            bold: True
-            color: app.t_txt
-        LeftLabel:
-            text: root.subtitle
-            font_size: sp(12)
-            color: app.t_muted
-    Pill:
-        size_hint: None, None
-        size: dp(80), dp(30)
-        pos_hint: {'center_y': .5}
-        text: root.ping_text
-        bg: root.ping_bg
-    PillButton:
-        size_hint: None, None
-        size: dp(54), dp(30)
-        pos_hint: {'center_y': .5}
-        text: 'Ping'
-        font_size: sp(12)
-        on_release: root.ping_one()
+        orientation: "vertical"
+        canvas.before:
+            Color:
+                rgba: 0.957, 0.965, 0.984, 1
+            Rectangle:
+                pos: self.pos
+                size: self.size
 
-<SpeedGraph>:
-    surf: app.t_surf
-    line: app.t_line
-
-<TitleLabel@Label>:
-    color: app.t_txt
-    bold: True
-    font_size: sp(15)
-    size_hint_y: None
-    height: dp(28)
-
-<FadeLabel>:
-    text_size: self.size
-    valign: 'middle'
-
-<ConnScreen>:
-    name: 'conn'
-    BoxLayout:
-        orientation: 'vertical'
-        padding: dp(20), dp(12), dp(20), dp(14)
-        spacing: dp(12)
-        BoxLayout:
+        GradientBox:
             size_hint_y: None
-            height: dp(40)
-            spacing: dp(10)
-            GhostButton:
-                size_hint_x: None
-                width: dp(80)
-                text: 'Back'
-                on_release: app.back_home()
-            LeftLabel:
-                text: root.title_text
-                font_size: sp(15)
-                bold: True
-                color: app.t_txt
-            Pill:
-                size_hint: None, None
-                size: dp(118), dp(26)
-                pos_hint: {'center_y': .5}
-                font_size: sp(11)
-                text: root.kind_text
-                bg: app.t_acc
-                opacity: 1 if root.kind_text else 0
-        FloatLayout:
-            size_hint_y: None
-            height: dp(176)
-            PowerButton:
-                size_hint: None, None
-                size: dp(150), dp(150)
-                pos_hint: {'center_x': .5, 'center_y': .5}
-                color: root.ring
-                busy: root.busy
-                breathe: app.vpn_on
-                on_release: app.toggle_connection()
-        FadeLabel:
-            size_hint_y: None
-            height: dp(54)
-            markup: True
-            value: root.big_text
-            font_size: sp(22)
-            color: root.ring
-            halign: 'center'
-        BoxLayout:
-            size_hint_y: None
-            height: dp(54)
-            Stat:
-                value: root.down_text
-                caption: 'Download'
-                accent: 0.13, 0.45, 0.96, 1
-            Stat:
-                value: root.up_text
-                caption: 'Upload'
-                accent: 0.55, 0.35, 0.90, 1
-            Stat:
-                value: root.ping_text
-                caption: 'Ping via tunnel'
-                accent: 0.10, 0.68, 0.42, 1
-        SpeedGraph:
-            size_hint_y: None
-            height: dp(80)
-            down: root.down_hist
-            up: root.up_hist
-        WrapLabel:
-            text: root.detail_text
-            font_size: sp(12)
-            color: app.t_muted
-        WrapLabel:
-            text: root.error_text
-            font_size: sp(11)
-            color: 0.90, 0.25, 0.30, 1
-        WrapLabel:
-            text: root.local_text
-            font_size: sp(12)
-            color: app.t_acc
-        Widget:
-        BoxLayout:
-            size_hint_y: None
-            height: dp(46)
-            spacing: dp(8)
-            GhostButton:
-                text: root.local_btn
-                on_release: app.toggle_local()
-            GhostButton:
-                text: 'Telegram'
-                on_release: app.open_telegram_local()
-            GhostButton:
-                text: 'Copy'
-                on_release: app.copy_current()
-
-ScreenManager:
-    SplashScreen:
-        id: splash
-        name: 'splash'
-    Screen:
-        name: 'home'
-        BoxLayout:
-            orientation: 'vertical'
-            padding: dp(20), dp(12), dp(20), dp(14)
+            height: dp(68)
+            padding: dp(16), dp(11)
             spacing: dp(12)
-
-            BoxLayout:
-                size_hint_y: None
-                height: dp(44)
-                Image:
-                    source: app.logo
-                    size_hint: None, None
-                    size: dp(38), dp(38)
-                    pos_hint: {'center_y': .5}
-                    mipmap: True
-                Widget:
-                    size_hint_x: None
-                    width: dp(8)
-                LeftLabel:
-                    text: 'Amizoo'
-                    font_size: sp(26)
-                    bold: True
-                    color: app.t_txt
-                PillButton:
-                    size_hint: None, None
-                    size: dp(150), dp(34)
-                    pos_hint: {'center_y': .5}
-                    text: ('VPN  ' + app.vpn_kind) if app.vpn_kind else 'VPN ON'
-                    opacity: 1 if app.vpn_on else 0
-                    disabled: not app.vpn_on
-                    bg: 0.10, 0.68, 0.42, 1
-                    bg_down: 0.07, 0.55, 0.34, 1
-                    on_release: app.open_conn()
-
-            Card:
-                size_hint_y: None
-                height: dp(212)
-                orientation: 'vertical'
-                padding: dp(10), dp(12), dp(10), dp(8)
-                spacing: dp(4)
-                PowerButton:
-                    size_hint: None, None
-                    size: dp(128), dp(128)
-                    pos_hint: {'center_x': .5}
-                    color: app.hero_color
-                    busy: app.hero_busy
-                    breathe: app.vpn_on
-                    on_release: app.quick_connect()
-                FadeLabel:
-                    size_hint_y: None
-                    height: dp(30)
-                    halign: 'center'
-                    value: app.hero_text
-                    font_size: sp(18)
-                    bold: True
-                    color: app.t_txt
-                FadeLabel:
-                    size_hint_y: None
-                    height: dp(20)
-                    halign: 'center'
-                    value: app.hero_sub
-                    font_size: sp(12)
-                    color: app.t_muted
-
-            BoxLayout:
-                size_hint_y: None
-                height: dp(36)
-                spacing: dp(8)
-                Chip:
-                    text: 'All'
-                    group: 'tab'
-                    state: 'down'
-                    on_state: app.set_tab('all') if self.state == 'down' else None
-                Chip:
-                    text: 'V2Ray'
-                    group: 'tab'
-                    on_state: app.set_tab('v2ray') if self.state == 'down' else None
-                Chip:
-                    text: 'SOCKS5'
-                    group: 'tab'
-                    on_state: app.set_tab('socks5') if self.state == 'down' else None
-                Chip:
-                    text: 'HTTP'
-                    group: 'tab'
-                    on_state: app.set_tab('http') if self.state == 'down' else None
-
-            FadeLabel:
-                size_hint_y: None
-                height: dp(20)
-                halign: 'left'
-                value: app.status_text
-                font_size: sp(12)
-                color: app.t_muted
-
-            Widget:
-                size_hint_y: None
-                height: dp(4)
-                canvas:
+            Label:
+                text: "A"
+                bold: True
+                font_size: "22sp"
+                size_hint_x: None
+                width: dp(46)
+                canvas.before:
                     Color:
-                        rgba: app.t_line
+                        rgba: 1, 1, 1, 0.24
                     RoundedRectangle:
                         pos: self.pos
                         size: self.size
-                        radius: [dp(2)]
-                    Color:
-                        rgba: app.t_acc
-                    RoundedRectangle:
-                        pos: self.pos
-                        size: max(self.height, self.width * app.progress), self.height
-                        radius: [dp(2)]
+                        radius: [dp(15)]
+            BoxLayout:
+                orientation: "vertical"
+                Label:
+                    text: "Aminium Studio"
+                    bold: True
+                    font_size: "19sp"
+                    halign: "left"
+                    valign: "bottom"
+                    text_size: self.size
+                Label:
+                    id: hdr_sub
+                    text: ""
+                    font_size: "12sp"
+                    color: 1, 1, 1, 0.85
+                    halign: "left"
+                    valign: "top"
+                    text_size: self.size
 
-            ScrollView:
-                bar_width: dp(3)
-                do_scroll_x: False
+        ScreenManager:
+            id: sm
+
+        LogBar:
+            id: logbar
+            on_release: app.show_log()
+
+        BoxLayout:
+            id: nav
+            size_hint_y: None
+            height: dp(60)
+            padding: dp(6), 0
+            canvas.before:
+                Color:
+                    rgba: 0.06, 0.09, 0.20, 0.07
+                Rectangle:
+                    pos: self.x, self.top
+                    size: self.width, dp(1.5)
+                Color:
+                    rgba: 1, 1, 1, 1
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+
+
+<TokenScreen>:
+    name: "token"
+    ScrollView:
+        bar_width: dp(3)
+        Page:
+            Card:
+                H1:
+                    text: "Connect Cloudflare"
+                Body:
+                    text: "One tap opens Cloudflare's token page with every permission Aminium needs already ticked. Press Continue, then Create Token, copy it and come back."
+                RoundButton:
+                    text: "Create API token (all permissions)"
+                    height: dp(52)
+                    on_release: app.open_token_page()
+                Muted:
+                    text: "Pre-selected:  Pages: Edit  |  Workers Scripts: Edit  |  Workers KV Storage: Edit  |  D1: Edit  |  Account Settings: Read  |  Account Analytics: Read  |  Zone: Read  |  DNS: Edit"
+                RoundButton:
+                    text: "Open the tokens page manually"
+                    kind: "soft"
+                    on_release: app.open_token_page(True)
+
+            Card:
+                H1:
+                    text: "Your token"
+                Muted:
+                    text: "Stored only on this phone (app-private storage)."
+                FieldLabel:
+                    text: "API token (or Global API Key)"
                 BoxLayout:
-                    id: rows
-                    orientation: 'vertical'
                     size_hint_y: None
-                    height: self.minimum_height
+                    height: dp(46)
                     spacing: dp(8)
+                    RoundInput:
+                        id: f_token
+                        password: True
+                    RoundButton:
+                        text: "Paste"
+                        kind: "soft"
+                        height: dp(46)
+                        size_hint_x: None
+                        width: dp(84)
+                        on_release: app.paste_token()
+                FieldLabel:
+                    text: "Email (only for a Global API Key)"
+                RoundInput:
+                    id: f_email
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(48)
+                    spacing: dp(8)
+                    RoundButton:
+                        text: "Save && verify"
+                        on_release: app.on_save_token()
+                    RoundButton:
+                        text: "Forget token"
+                        kind: "danger"
+                        on_release: app.on_forget_token()
+                Label:
+                    id: lbl_token_state
+                    text: ""
+                    font_size: "12sp"
+                    color: C_MUTED
+                    size_hint_y: None
+                    height: self.texture_size[1] + dp(4)
+                    halign: "left"
+                    text_size: self.width, None
+                FieldLabel:
+                    text: "Account"
+                RoundSpinner:
+                    id: sp_account
+                    text: "(verify token first)"
 
+
+<ScanScreen>:
+    name: "scan"
+    ScrollView:
+        bar_width: dp(3)
+        Page:
+            Radar:
+                id: radar
             BoxLayout:
                 size_hint_y: None
-                height: dp(54)
+                height: dp(64)
                 spacing: dp(10)
-                PillButton:
-                    font_size: sp(16)
-                    text: 'Stop' if app.scanning else 'Find servers'
-                    bg: (0.90, 0.25, 0.30, 1) if app.scanning else app.t_acc
-                    bg_down: (0.75, 0.18, 0.24, 1) if app.scanning else app.t_acc_dn
-                    on_release: app.toggle_scan()
-                GhostButton:
-                    size_hint_x: None
-                    width: dp(60)
-                    font_size: sp(18)
-                    text: '...'
-                    on_release: app.open_menu()
-    ConnScreen:
-        id: conn
+                StatBox:
+                    id: st_tested
+                    caption: "TESTED"
+                StatBox:
+                    id: st_found
+                    caption: "CLEAN IPs"
+                    accent: 0.09, 0.64, 0.29, 1
+                StatBox:
+                    id: st_time
+                    caption: "SECONDS"
+            Card:
+                SoftBar:
+                    id: pb_scan
+                Muted:
+                    id: lbl_scan_stats
+                    text: "Ready when you are. Turn any VPN off first."
+                FieldLabel:
+                    text: "Connection"
+                RoundSpinner:
+                    id: sp_conn
+                    text: "TLS"
+                    values: ["TLS", "No TLS"]
+                FieldLabel:
+                    text: "Search depth"
+                RoundSpinner:
+                    id: sp_depth
+                    text: "Normal"
+                    values: ["Quick", "Normal", "Deep"]
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(52)
+                    spacing: dp(8)
+                    RoundButton:
+                        id: btn_scan
+                        text: "Start scan"
+                        height: dp(52)
+                        on_release: app.on_scan()
+                    RoundButton:
+                        id: btn_stop
+                        text: "Stop"
+                        kind: "danger"
+                        height: dp(52)
+                        size_hint_x: None
+                        width: dp(100)
+                        disabled: True
+                        on_release: app.on_stop_scan()
+            Card:
+                H1:
+                    text: "Clean IPs"
+                Muted:
+                    id: lbl_ip_empty
+                    text: "(none yet)"
+                BoxLayout:
+                    id: ip_list
+                    orientation: "vertical"
+                    size_hint_y: None
+                    height: self.minimum_height
+                    spacing: dp(6)
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(48)
+                    spacing: dp(8)
+                    RoundButton:
+                        text: "Copy all IPs"
+                        kind: "soft"
+                        on_release: app.copy_ips()
+                    RoundButton:
+                        text: "Continue to build"
+                        on_release: app.goto("build")
+
+
+<BuildScreen>:
+    name: "build"
+    ScrollView:
+        bar_width: dp(3)
+        Page:
+            Card:
+                H1:
+                    text: "Build your panel"
+                Body:
+                    id: lbl_build_sum
+                    text: ""
+                FieldLabel:
+                    text: "Deploy to"
+                RoundSpinner:
+                    id: sp_mode
+                    text: "Workers (recommended)"
+                    values: ["Workers (recommended)", "Pages (pages.dev)"]
+                FieldLabel:
+                    text: "Source zip (aminium-pages.zip)"
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(46)
+                    spacing: dp(8)
+                    RoundInput:
+                        id: f_source
+                    RoundButton:
+                        text: "Pick"
+                        kind: "soft"
+                        height: dp(46)
+                        size_hint_x: None
+                        width: dp(84)
+                        on_release: app.pick_source_file()
+                FieldLabel:
+                    text: "Project name"
+                RoundInput:
+                    id: f_project
+                FieldLabel:
+                    text: "ADMIN_PASSWORD"
+                RoundInput:
+                    id: f_pass
+                FieldLabel:
+                    text: "PANEL_PATH"
+                RoundInput:
+                    id: f_panel
+                FieldLabel:
+                    text: "Custom domain (optional)"
+                RoundInput:
+                    id: f_domain
+                RoundButton:
+                    text: "Re-roll random values"
+                    kind: "soft"
+                    on_release: app.roll_all()
+
+            Card:
+                Ring:
+                    id: ring
+                Label:
+                    id: lbl_build_stage
+                    text: "Waiting for you."
+                    font_size: "13sp"
+                    color: C_MUTED
+                    size_hint_y: None
+                    height: self.texture_size[1] + dp(4)
+                    halign: "center"
+                    text_size: self.width, None
+                RoundButton:
+                    id: btn_build
+                    text: "Build my configs"
+                    height: dp(54)
+                    on_release: app.on_build()
+
+
+<OutputScreen>:
+    name: "output"
+    ScrollView:
+        bar_width: dp(3)
+        Page:
+            Card:
+                H1:
+                    text: "Your configs"
+                Body:
+                    id: lbl_out_info
+                    text: "Nothing built yet. Go through steps 1-3, or load one from the Saved tab."
+                FieldLabel:
+                    text: "Format"
+                RoundSpinner:
+                    id: sp_fmt
+                    text: "Auto (recommended)"
+                    values: ["Auto (recommended)", "Xray + fragment", "Clash", "sing-box", "Patt", "Plain links"]
+                    on_text: app.on_pick_fmt(self.text)
+                FieldLabel:
+                    text: "Subscription link"
+                RoundInput:
+                    id: f_sub_url
+                    readonly: True
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(48)
+                    spacing: dp(8)
+                    RoundButton:
+                        text: "Copy link"
+                        on_release: app.copy_sub_url()
+                    RoundButton:
+                        text: "Save all to device"
+                        kind: "soft"
+                        on_release: app.save_all_configs()
+                FieldLabel:
+                    text: "Preview"
+                RoundInput:
+                    id: f_preview
+                    multiline: True
+                    readonly: True
+                    height: dp(240)
+                    padding: [dp(14), dp(12)]
+                    font_size: "12sp"
+
+
+<ManageScreen>:
+    name: "manage"
+    BoxLayout:
+        orientation: "vertical"
+        padding: dp(14), dp(14), dp(14), 0
+        spacing: dp(12)
+        Card:
+            H1:
+                text: "Saved configs"
+            Muted:
+                text: "Everything you built on this phone. Load one back into the Configs tab, rename it, or remove it from the list."
+        ScrollView:
+            bar_width: dp(3)
+            BoxLayout:
+                id: manage_list
+                orientation: "vertical"
+                size_hint_y: None
+                height: self.minimum_height
+                spacing: dp(12)
+                padding: 0, 0, 0, dp(14)
 """
 
 
-def fmt_bytes(n):
-    n = float(max(0, n))
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
-            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
-        n /= 1024.0
-
-
-def fmt_time(sec):
-    sec = int(max(0, sec))
-    return "%02d:%02d:%02d" % (sec // 3600, sec % 3600 // 60, sec % 60)
+# ───────────────────────────── custom widgets ─────────────────────────────
+class Page(BoxLayout):
+    pass
 
 
 class Card(BoxLayout):
-    bg = ListProperty([1, 1, 1, 1])
-    radius = ListProperty([dp(18)])
+    pass
 
 
-class Stat(BoxLayout):
-    value = StringProperty("0")
-    caption = StringProperty("")
-    accent = ListProperty([0.1, 0.1, 0.2, 1])
+class RoundInput(TextInput):
+    pass
 
 
-class PillButton(Button):
-    bg = ListProperty(BLUE)
-    bg_down = ListProperty(BLUE_DN)
+class RoundSpinner(Spinner):
+    pass
+
+
+class RoundButton(ButtonBehavior, Label):
+    kind = StringProperty("primary")      # primary | soft | danger | ghost
+    bg_color = ListProperty([0.31, 0.275, 0.90, 1])
     fg = ListProperty([1, 1, 1, 1])
 
-
-class GhostButton(PillButton):
-    """Secondary button: light fill, dark text (colors come from the theme in KV)."""
-
-
-class Pill(Label):
-    bg = ListProperty(GREY)
-
-
-class PowerButton(ButtonBehavior, Widget):
-    """Big round connect button with a soft halo; the halo pulses while `busy` (and breathes while `breathe`).
-    Canvas instructions are created once and only updated afterwards (smooth on slow phones)."""
-    color = ListProperty(BLUE)
-    busy = BooleanProperty(False)
-    breathe = BooleanProperty(False)
-    phase = NumericProperty(0)
+    _PALETTE = {
+        "primary": ((0.31, 0.275, 0.90, 1), (1, 1, 1, 1)),
+        "soft": ((0.90, 0.91, 1.0, 1), (0.31, 0.275, 0.90, 1)),
+        "danger": ((1.0, 0.90, 0.90, 1), (0.80, 0.12, 0.12, 1)),
+        "ghost": ((0, 0, 0, 0), (0.39, 0.45, 0.55, 1)),
+    }
 
     def __init__(self, **kw):
         super().__init__(**kw)
-        self._ev, self._r = None, 1.0
-        with self.canvas:
-            self._c_halo, self._e_halo = Color(), Ellipse()
-            self._c_p1, self._e_p1 = Color(0, 0, 0, 0), Ellipse()
-            self._c_p2, self._e_p2 = Color(0, 0, 0, 0), Ellipse()
-            self._c_main, self._e_main = Color(), Ellipse()
-            self._c_spin, self._l_spin = Color(1, 1, 1, 0), Line(circle=(0, 0, 1, 0, 90), width=dp(2.4), cap="round")
-            Color(1, 1, 1, 1)
-            self._l_ring = Line(circle=(0, 0, 1, 40, 320), width=dp(3.6), cap="round")
-            self._l_bar = Line(points=[0, 0, 0, 1], width=dp(3.6), cap="round")
-        self.bind(pos=self._layout, size=self._layout)
-        for name in ("color", "state", "phase", "busy", "breathe"):
-            self.bind(**{name: self._paint})
-        self.bind(busy=self._on_busy, breathe=self._on_busy)
-        self._on_busy()
-        self._layout()
+        self.halign = "center"
+        self.valign = "middle"
+        self.bind(kind=self._recalc, state=self._recalc, disabled=self._recalc)
+        self._recalc()
 
-    def _on_busy(self, *_):
-        on = self.busy or self.breathe
-        if on and self._ev is None:
-            self._ev = Clock.schedule_interval(self._step, 1 / 30.0)
-        elif not on and self._ev is not None:
-            self._ev.cancel()
-            self._ev = None
-            self.phase = 0
-
-    def _step(self, dt):
-        self.phase = (self.phase + dt / (1.4 if self.busy else 2.6)) % 1.0
-
-    def _layout(self, *_):
-        cx, cy = self.center
-        r = self._r = min(self.size) / 2.0 * 0.78
-        self._e_halo.pos, self._e_halo.size = (cx - r * 1.22, cy - r * 1.22), (r * 2.44, r * 2.44)
-        self._e_main.pos, self._e_main.size = (cx - r, cy - r), (2 * r, 2 * r)
-        self._l_ring.circle = (cx, cy, r * 0.38, 40, 320)
-        self._l_bar.points = [cx, cy + r * 0.05, cx, cy + r * 0.52]
-        self._paint()
-
-    def _paint(self, *_):
-        cx, cy = self.center
-        r, c = self._r, self.color
-        self._c_halo.rgba = (c[0], c[1], c[2], 0.13)
-        active = self.busy or self.breathe
-        for off, col, el in ((0.0, self._c_p1, self._e_p1), (0.5, self._c_p2, self._e_p2)):
-            if active:
-                ph = (self.phase + off) % 1.0
-                k = 1 + 0.30 * ph
-                col.rgba = (c[0], c[1], c[2], 0.30 * (1 - ph))
-                el.pos, el.size = (cx - r * k, cy - r * k), (r * 2 * k, r * 2 * k)
-            else:
-                col.rgba = (0, 0, 0, 0)
-        self._c_main.rgba = (c[0], c[1], c[2], 0.82 if self.state == "down" else 1)
-        if self.busy:
-            ang = self.phase * 360
-            self._c_spin.rgba = (1, 1, 1, 0.55)
-            self._l_spin.circle = (cx, cy, r * 0.86, ang, ang + 90)
-        else:
-            self._c_spin.rgba = (1, 1, 1, 0)
+    def _recalc(self, *_):
+        bg, fg = self._PALETTE.get(self.kind, self._PALETTE["primary"])
+        if self.disabled:
+            bg, fg = (0.89, 0.91, 0.94, 1), (0.62, 0.66, 0.72, 1)
+        elif self.state == "down":
+            bg = (bg[0] * 0.86, bg[1] * 0.86, bg[2] * 0.86, bg[3])
+        self.bg_color = list(bg)
+        self.fg = list(fg)
 
 
-class SpeedGraph(Widget):
-    down = ListProperty([])
-    up = ListProperty([])
-    surf = ListProperty([1, 1, 1, 1])
-    line = ListProperty(LINE)
-
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        for name in ("pos", "size", "down", "up", "surf", "line"):
-            self.bind(**{name: self._draw})
-
-    def _draw(self, *_):
-        self.canvas.clear()
-        x0, y0 = self.pos
-        w, h = self.size
-        pad = dp(10)
-        with self.canvas:
-            Color(*self.surf)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(16)])
-            Color(*self.line)
-            Line(rounded_rectangle=(x0, y0, w, h, dp(16)), width=1)
-            peak = max([50000.0] + list(self.down) + list(self.up))
-            for data, col in ((self.up, (0.55, 0.35, 0.90, 1)), (self.down, (0.13, 0.45, 0.96, 1))):
-                if len(data) > 1:
-                    off, pts = HIST - len(data), []
-                    for i, v in enumerate(data):
-                        pts += [x0 + pad + (w - 2 * pad) * (off + i) / float(HIST - 1),
-                                y0 + pad + (h - 2 * pad) * v / peak]
-                    Color(*col)
-                    Line(points=pts, width=dp(1.8))
+class NavTab(ButtonBehavior, Label):
+    active = BooleanProperty(False)
+    target = StringProperty("")
 
 
-FAILED = set()          # id(proxy) of servers whose last single ping failed (they stay in the list)
+class SoftBar(Widget):
+    value = NumericProperty(0)
 
 
-class ServerRow(ButtonBehavior, Card):
+class StatBox(BoxLayout):
+    value = StringProperty("0")
+    caption = StringProperty("")
+    accent = ListProperty([0.31, 0.275, 0.90, 1])
+
+
+class IpRow(BoxLayout):
+    ip = StringProperty("")
+    meta = StringProperty("")
+    score = NumericProperty(0)
+
+
+class DeployRow(Card):
     title = StringProperty("")
     subtitle = StringProperty("")
-    ping_text = StringProperty("")
-    ping_bg = ListProperty(GREY)
-    flag = StringProperty("")
+    index = NumericProperty(0)
 
-    def __init__(self, proxy, **kw):
+
+class LogBar(ButtonBehavior, BoxLayout):
+    last = StringProperty("Ready.")
+
+
+class ToastLabel(Label):
+    pass
+
+
+class GradientBox(BoxLayout):
+    c1 = ListProperty(C_PRIMARY)
+    c2 = ListProperty(C_CYAN)
+
+    def __init__(self, **kw):
         super().__init__(**kw)
-        self.proxy = proxy
-        ms = proxy.ms
-        self.flag = pc.flag_path_cached(proxy.cc)
-        where = ("  -  " + proxy.country) if proxy.country else ""
-        if proxy.kind == "v2ray":
-            self.title = (proxy.name or proxy.addr)[:28]
-            kind = "%s  %s" % ((proxy.proto or "v2ray").upper(), (proxy.sec or "none").upper())
-            verified = bool(proxy.ok_real)
-            self.subtitle = kind + ("  verified" if verified else "  unverified") + where
-            self.ping_text = ("%d ms" % ms) if (ms and verified) else "?"
-            good = verified and ms
-        else:
-            self.title = proxy.addr
-            self.subtitle = ("SOCKS5" if proxy.kind == "socks5" else "HTTP") + where
-            self.ping_text = ("%d ms" % ms) if ms else "-"
-            good = ms
-        if id(proxy) in FAILED:
-            self.ping_text, good = "timeout", False
-        self.ping_bg = [0.85, 0.27, 0.27, 1] if id(proxy) in FAILED else [0.62, 0.66, 0.76, 1] if not good else ([0.10, 0.68, 0.42, 1] if ms < 500 else
-                                                               [0.90, 0.62, 0.05, 1] if ms < 1200 else [0.90, 0.45, 0.15, 1])
-        self.bind(on_release=lambda *_: App.get_running_app().connect_to(self.proxy))
-
-    def ping_one(self):
-        self.ping_text, self.ping_bg = "...", [0.62, 0.66, 0.76, 1]
-        App.get_running_app().ping_one(self.proxy)
-
-
-class ConnScreen(Screen):
-    title_text = StringProperty("")
-    big_text = StringProperty("")
-    ring = ListProperty(BLUE)
-    busy = BooleanProperty(False)
-    down_text = StringProperty("0 B/s")
-    up_text = StringProperty("0 B/s")
-    ping_text = StringProperty("-")
-    detail_text = StringProperty("")
-    error_text = StringProperty("")
-    local_text = StringProperty("")
-    local_btn = StringProperty("Local proxy")
-    kind_text = StringProperty("")
-    down_hist = ListProperty([])
-    up_hist = ListProperty([])
-
-
-# ------------------------------------------------------------------ Android helpers
-def _android_activity():
-    from jnius import autoclass
-    return autoclass("org.kivy.android.PythonActivity").mActivity
-
-
-def android_view(url):
-    from jnius import autoclass
-    Intent = autoclass("android.content.Intent")
-    Uri = autoclass("android.net.Uri")
-    _android_activity().startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-
-
-def android_share(text):
-    from jnius import autoclass, cast
-    Intent = autoclass("android.content.Intent")
-    String = autoclass("java.lang.String")
-    it = Intent()
-    it.setAction(Intent.ACTION_SEND)
-    it.putExtra(Intent.EXTRA_TEXT, String(text))
-    it.setType("text/plain")
-    _android_activity().startActivity(Intent.createChooser(it, cast("java.lang.CharSequence", String("Share"))))
-
-
-def _sort_key(p):
-    unverified = p.kind == "v2ray" and not p.ok_real
-    return (unverified, p.ms or 10 ** 9)
-
-
-class AmizooApp(App):
-    title = "Amizoo"
-    logo = StringProperty(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png"))
-    port_text = StringProperty("any")
-    progress = NumericProperty(0)
-    scanning = BooleanProperty(False)
-    vpn_on = BooleanProperty(False)
-    status_text = StringProperty("Tap the big button, or 'Find servers'.")
-    hero_text = StringProperty("Tap to connect")
-    hero_sub = StringProperty("The best server is picked for you")
-    hero_color = ListProperty(BLUE)
-    hero_busy = BooleanProperty(False)
-    vpn_kind = StringProperty("")
-    theme_name = StringProperty("light")
-    t_bg = ListProperty(THEMES["light"]["bg"])
-    t_surf = ListProperty(THEMES["light"]["surf"])
-    t_surf2 = ListProperty(THEMES["light"]["surf2"])
-    t_line = ListProperty(THEMES["light"]["line"])
-    t_txt = ListProperty(THEMES["light"]["txt"])
-    t_muted = ListProperty(THEMES["light"]["muted"])
-    t_acc = ListProperty(THEMES["light"]["acc"])
-    t_acc_dn = ListProperty(THEMES["light"]["acc_dn"])
-
-    def build(self):
-        self.settings_path = os.path.join(self.user_data_dir, "settings.json")
-        self.settings = self._read_settings()
-        sys.setswitchinterval(0.001)                             # the UI thread gets the GIL back faster while scans run
-        self.seen_rows = set()
-        self._st_t = self._save_t = 0.0
-        self._prev = []
-        self.set_theme(self.settings.get("theme", "light"), animate=False, save=False)
-        Window.clearcolor = self.t_bg
-        self.bind(t_bg=lambda *_: setattr(Window, "clearcolor", self.t_bg))
-        ui_kit.LOGO = self.logo
-        self.auto_connect = False
-        self.icon = self.logo
-        self.port_filter = None                                  # None = any port (freeproxy.world ?port=)
-        Window.bind(on_keyboard=self._on_key)
-        self.working, self.total, self.tested = [], 0, 0
-        self.tab = "all"
-        self.stop_evt = threading.Event()
-        self.ping_busy = False
-        self.engine = en.get_engine()
-        self.local = xt.LocalProxy()
-        self.xray_ok = xt.find_xray() is not None
-        self.current = None
-        self._last_rx = self._last_tx = 0
-        self._last_tick = self._last_ping = 0.0
-        self._ping_running, self._direct = False, None
-        self._refresh = Clock.create_trigger(self._refresh_list, 1.5)
-        return Builder.load_string(KV)
-
-    def on_start(self):
-        self.cache_path = os.path.join(self.user_data_dir, "last_scan.json")
-        self.settings_path = os.path.join(self.user_data_dir, "settings.json")
-        pc.CACHE_FILE = os.path.join(self.user_data_dir, "v2ray_cache.txt")
-        pc.FLAG_DIR = os.path.join(self.user_data_dir, "flags")
-        self._geo_busy = False
-        self._load_settings()
-        self.working = pc.load_results(self.cache_path)
-        if self.working:
-            self.status_text = "Last scan: %d servers (not re-tested)." % len(self.working)
-        self._refresh_list()
-        self._geo_async()
-        adopted = self.engine.adopt()                            # the VPN kept running while the app was closed
-        if adopted:
-            self.current = adopted
-            self._conn().title_text = self._title_of(adopted)
-            self._conn().kind_text = self._kind_of(adopted)
-            s = self.engine.poll()
-            self._last_rx, self._last_tx, self._last_tick = s["rx"], s["tx"], time.time()
-        Clock.schedule_interval(self._tick, 1.0)
-        self.root.ids.splash.start(self._enter_home)
-
-    def on_pause(self):
-        self._save_now(True)
-        return True
-
-    def on_stop(self):
-        self._save_now(True)
-        try:
-            self.local.stop()
-        except Exception:
-            pass
-
-    def _on_key(self, window, key, *args):
-        if key == 27 and self.root.current == "conn":              # Android back button
-            self.back_home()
-            return True
-        return False
-
-    # ================================================================== list / tabs
-    def set_tab(self, tab):
-        self.tab = tab
-        self._refresh_list()
-
-    def _refresh_list(self, *_):
-        if self.root.current == "splash":
-            return                                              # rows are built when the start-up screen ends
-        rows = self.root.ids.rows
-        rows.clear_widgets()
-        shown = [p for p in self.working if self.tab == "all" or p.kind == self.tab][:15 if self.scanning else MAX_SHOWN]      # few rows while scanning = smooth UI
-        for i, p in enumerate(shown):
-            row = ServerRow(p)
-            if self.root.current != "splash" and id(p) not in self.seen_rows:
-                self.seen_rows.add(id(p))                        # new rows fade in, one after another
-                row.opacity = 0
-                anim = Animation(opacity=1, d=0.35, t="out_quad")
-                Clock.schedule_once(lambda dt, a=anim, r=row: a.start(r), min(i, 12) * 0.05)
-            rows.add_widget(row)
-        if not shown:
-            rows.add_widget(Label(text="Nothing here yet.", size_hint_y=None, height=dp(80),
-                                  color=self.t_muted, font_size=dp(14)))
-
-    def _best(self):
-        return self.working[0] if self.working else None
-
-    def quick_connect(self):
-        """One tap: disconnect if connected, else connect to the best server (searching first when the list is empty)."""
-        if self.engine.state in ("starting", "running"):
-            self.engine.disconnect()
-            return
-        if self.scanning:
-            self.auto_connect = False
-            self.stop_evt.set()
-            return
-        best = self._best()
-        if best:
-            self.connect_to(best)
-        else:
-            self.auto_connect = True
-            self.scan(False)
-
-    # ================================================================== scanning
-    def toggle_scan(self):
-        if self.scanning:
-            self.stop_evt.set()
-            self.status_text = "Stopping..."
-        else:
-            self.scan(False)
-
-    def scan(self, from_clipboard):
-        if self.scanning:
-            return
-        clip = ""
-        if from_clipboard:
-            try:
-                clip = Clipboard.paste() or ""
-            except Exception:
-                clip = ""
-            if not clip.strip():
-                self.status_text = "Clipboard is empty. Copy ip:port lines or vless/vmess/trojan/ss links first."
-                return
-        self.scanning = True
-        self.stop_evt = threading.Event()
-        self._prev = list(self.working)                          # kept until the new scan has something
-        self.working, self.total, self.tested = [], 0, 0
-        self.progress = 0
-        self._refresh_list()
-        threading.Thread(target=self._worker, args=(from_clipboard, clip, self.stop_evt), daemon=True).start()
-
-    def _ui(self, fn, *args):
-        Clock.schedule_once(lambda dt: fn(*args), 0)
-
-    def _worker(self, from_clipboard, clip, stop):
-        kinds = ["socks5", "http", "v2ray"]
-        try:
-            if from_clipboard:
-                cands = pc.parse_proxies(clip, ("socks5", "http")) + pc.parse_v2ray(clip)
-            else:
-                self._ui(self._say, "Downloading lists (freeproxy.world%s + my V2Ray subscription)..." % (
-                    (" port %d" % self.port_filter) if self.port_filter else ""))
-                cands = pc.fetch_candidates(kinds, log=lambda m: self._ui(self._say, m), stop=stop,
-                                            port=self.port_filter)
-            if stop.is_set():
-                return
-            if not cands:
-                self._ui(self._say, "Nothing downloaded - the sites may be blocked. Copy a list, then ... > Paste list.")
-                return
-            sample = pc.pick_sample(cands, MAX_TEST)
-            self._ui(self._begin, len(sample))
-            pend, simple = [], []                                   # collected here: UI callbacks lag behind
-
-            def on_res(p, ok):
-                if ok:
-                    (pend if p.kind == "v2ray" and self.xray_ok else simple).append(p)
-                self._ui(self._result, p, ok)
-
-            pc.test_many(sample, on_res, stop, workers=32)
-            if stop.is_set():
-                return
-            if pend:                                                # 1) V2Ray: verify with the real Xray core
-                pend.sort(key=lambda p: p.ms or 10 ** 9)
-                pend = pend[:V2_VERIFY_MAX]
-                self._ui(self._say, "Verifying %d V2Ray configs with the Xray core..." % len(pend))
-                count = [0]
-
-                def on_real(p, ms):
-                    count[0] += 1
-                    self._ui(self._verified, p, ms, count[0], len(pend))
-                xt.real_delay_many(pend, stop, on_real)
-            if simple and not stop.is_set():                        # 2) SOCKS5/HTTP: ping again from this phone
-                simple.sort(key=lambda p: p.ms or 10 ** 9)
-                top = simple[:40]
-                self._ui(self._say, "Measuring real ping (%d best)..." % len(top))
-                pc.ping_many(top, lambda p, r: self._ui(self._pinged, p, r), stop, samples=3, workers=16)
-        except Exception as e:
-            self._ui(self._say, "Error: %s: %s" % (type(e).__name__, e))
-        finally:
-            self._ui(self._finish, stop)
-
-    def _say(self, text):
-        self.status_text = text
-
-    def _begin(self, total):
-        self.total = total
-        self.status_text = "Testing %d servers..." % total
-
-    def _result(self, p, ok):
-        self.tested += 1
-        if self.total:
-            self.progress = self.tested / float(self.total)
-        if ok and not (p.kind == "v2ray" and self.xray_ok):        # V2Ray waits for the real check
-            self.working.append(p)
-            self.working.sort(key=_sort_key)
-            self._refresh()
-        now = time.time()
-        if now - self._st_t > 0.3 or self.tested >= self.total:
-            self._st_t = now
-            self.status_text = "Testing... %d / %d  -  %d passed" % (self.tested, self.total, len(self.working))
-
-    def _save_now(self, force=False):
-        now = time.time()
-        if self.working and hasattr(self, "cache_path") and (force or now - self._save_t > 4):
-            self._save_t = now
-            pc.save_results(self.cache_path, self.working)
-
-    def _verified(self, p, ms, i, n):
-        if ms is not None:
-            p.ms, p.ok_real = ms, True
-            self.working.append(p)
-            self.working.sort(key=_sort_key)
-            self._refresh()
-            self._save_now()
-        self.status_text = "Xray check %d / %d  -  %d V2Ray verified" % (
-            i, n, sum(1 for x in self.working if x.kind == "v2ray"))
-
-    def _pinged(self, p, r):
-        p.tcp = r["tcp"]
-        if r["ms"] is None:
-            if p in self.working:
-                self.working.remove(p)                             # answered once, then 0/3: flaky
-        else:
-            p.ms = r["ms"]
-        self.working.sort(key=_sort_key)
-        self._refresh()
-
-    def _finish(self, stop):
-        if stop is not self.stop_evt:
-            return
-        self.scanning = False
-        stopped = stop.is_set()
-        if (stopped or not self.working) and self._prev:        # stopped early / nothing new: keep the saved ones
-            have = {pc._key(p) for p in self.working}
-            self.working += [p for p in self._prev if pc._key(p) not in have]
-            self.working.sort(key=_sort_key)
-        self._prev = []
-        if self.total and not stopped:
-            self.progress = 1
-        self._refresh_list()
-        if self.working:
-            pc.save_results(self.cache_path, self.working)
-            self._geo_async()
-        n = len(self.working)
-        v2 = sum(1 for x in self.working if x.kind == "v2ray")
-        if self.auto_connect:
-            self.auto_connect = False
-            if self._best() and not stopped:
-                self.connect_to(self._best())
-        if stopped:
-            self.status_text = "Stopped. %d servers." % n
-        elif self.tested:
-            note = "" if self.xray_ok else "  (V2Ray unverified: Xray core missing)"
-            self.status_text = ("%d ready (%d V2Ray verified). Tap one to connect.%s" % (n, v2, note)) if n else \
-                "None passed. Search again - free lists change fast."
-
-    def _geo_async(self):
-        """Country name + flag for the listed servers (background; the list redraws when it is done)."""
-        if self._geo_busy or not self.working:
-            return
-        self._geo_busy = True
-        items = list(self.working[:MAX_SHOWN])
-
-        def work():
-            try:
-                pc.geolocate(items)
-                for cc in {p.cc for p in items if p.cc}:
-                    pc.flag_path(cc)
-                if self.working:
-                    pc.save_results(self.cache_path, self.working)
-            finally:
-                self._geo_busy = False
-                self._ui(self._refresh_list)
-        threading.Thread(target=work, daemon=True).start()
-
-    def reping(self):
-        """Measure again from this phone: SOCKS5/HTTP by timing requests, V2Ray through the Xray core."""
-        if self.ping_busy or self.scanning or not self.working:
-            self.status_text = "Nothing to ping yet." if not self.working else "Busy..."
-            return
-        self.ping_busy = True
-        evt = threading.Event()
-        items = list(self.working[:MAX_SHOWN])
-        self.status_text = "Pinging %d servers from this phone..." % len(items)
-
-        def work():
-            try:
-                simple = [p for p in items if p.kind != "v2ray"]
-                v2 = [p for p in items if p.kind == "v2ray" and self.xray_ok]
-                if v2:
-                    xt.real_delay_many(v2, evt, lambda p, ms: self._ui(self._repinged_v2, p, ms))
-                if simple:
-                    pc.ping_many(simple, lambda p, r: self._ui(self._repinged_simple, p, r), evt, samples=3, workers=16)
-            finally:
-                self._ui(self._reping_done)
-        threading.Thread(target=work, daemon=True).start()
-
-    def _repinged_v2(self, p, ms):
-        if ms is None:
-            FAILED.add(id(p))                                   # shown as "timeout", never deleted from the list
-        else:
-            FAILED.discard(id(p))
-            p.ms, p.ok_real = ms, True
-        self.working.sort(key=_sort_key)
-        self._refresh()
-
-    def _repinged_simple(self, p, r):
-        p.tcp = r["tcp"]
-        if r["ms"] is None:
-            FAILED.add(id(p))
-        else:
-            FAILED.discard(id(p))
-            p.ms = r["ms"]
-        self.working.sort(key=_sort_key)
-        self._refresh()
-
-    def ping_one(self, p):
-        """Ping ONE server (the Ping button on its row). A server that does not answer stays in the list."""
-        evt = threading.Event()
-        got = []
-
-        def work():
-            try:
-                if p.kind == "v2ray" and self.xray_ok:
-                    xt.real_delay_many([p], evt, lambda q, ms: got.append(ms))
-                    ms = got[0] if got else None
-                else:
-                    pc.ping_many([p], lambda q, r: got.append(r["ms"]), evt, samples=3, workers=1)
-                    ms = got[0] if got else None
-            except Exception:
-                ms = None
-            self._ui(self._one_done, p, ms)
-        threading.Thread(target=work, daemon=True).start()
-
-    def _one_done(self, p, ms):
-        if ms is None:
-            FAILED.add(id(p))
-            self.status_text = "%s: no answer (kept in the list)." % (p.name or p.addr)
-        else:
-            FAILED.discard(id(p))
-            p.ms = ms
-            if p.kind == "v2ray":
-                p.ok_real = True
-            self.status_text = "%s: %d ms" % (p.name or p.addr, ms)
-        if self.working:
-            pc.save_results(self.cache_path, self.working)
-        self._refresh()
-
-    def _reping_done(self):
-        self.ping_busy = False
-        if self.working:
-            pc.save_results(self.cache_path, self.working)
-        self.status_text = "Ping updated: %d of %d servers answered." % (sum(1 for x in self.working if id(x) not in FAILED), len(self.working))
-
-    # ================================================================== settings / port filter
-    def _read_settings(self):
-        try:
-            with open(self.settings_path, encoding="utf-8") as f:
-                d = json.load(f)
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            return {}
-
-    def _save_settings(self):
-        try:
-            with open(self.settings_path, "w", encoding="utf-8") as f:
-                json.dump(self.settings, f)
-        except OSError:
-            pass
-
-    def _load_settings(self):
-        try:
-            port = int(self.settings.get("port") or 0)
-        except (ValueError, TypeError):
-            port = 0
-        self.set_port(port if 1 <= port <= 65535 else None, save=False)
-        self._load_share()
-
-    def set_theme(self, key, animate=True, save=True):
-        if key not in THEMES:
-            key = "light"
-        self.theme_name = key
-        vals = {"t_" + k: list(THEMES[key][k]) for k in ("bg", "surf", "surf2", "line", "txt", "muted", "acc", "acc_dn")}
-        if animate:
-            Animation.cancel_all(self)
-            Animation(d=0.45, t="out_quad", **vals).start(self)
-        else:
-            for k, v in vals.items():
-                setattr(self, k, v)
-        if save:
-            self.settings["theme"] = key
-            self._save_settings()
-        if animate:
-            self._tick(0)
-
-    def _enter_home(self):
-        self.root.transition = FadeTransition(duration=0.55)
-        self.root.current = "home"
-        self.seen_rows.clear()
-        self._refresh_list()
-
-    def _go(self, name, direction):
-        self.root.transition = SlideTransition(direction=direction, duration=0.28)
-        self.root.current = name
-
-    def open_theme_dialog(self):
-        mv = ModalView(size_hint=(0.9, None), height=dp(430), background="", background_color=(0.05, 0.08, 0.16, 0.45))
-        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10))
-        card.add_widget(Factory.TitleLabel(text="Choose a theme"))
-        grid = GridLayout(cols=2, spacing=dp(10), size_hint_y=None, height=dp(3 * 84 + 20))
-        sw = {}
-
-        def pick(key):
-            self.set_theme(key)
-            for k, w in sw.items():
-                w.selected = k == key
-
-        for key in THEMES:
-            w = ThemeSwatch(key, selected=key == self.theme_name)
-            w.bind(on_release=lambda _w, k=key: pick(k))
-            sw[key] = w
-            grid.add_widget(w)
-        card.add_widget(grid)
-        done = PillButton(text="Done", size_hint_y=None, height=dp(46))
-        done.bind(on_release=mv.dismiss)
-        card.add_widget(done)
-        mv.add_widget(card)
-        mv.open()
-
-    def set_port(self, port, save=True):
-        self.port_filter = port
-        self.port_text = str(port) if port else "any"
-        if save:
-            self.settings["port"] = port or 0
-            self._save_settings()
-
-    def open_port_dialog(self):
-        mv = ModalView(size_hint=(0.88, None), height=dp(250), background="", background_color=(0.05, 0.08, 0.16, 0.45))
-        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10))
-        card.add_widget(Label(text="SOCKS5 / HTTP port (freeproxy.world)", font_size=dp(15), bold=True,
-                              color=self.t_txt, size_hint_y=None, height=dp(28)))
-        box = TextInput(text=str(self.port_filter or ""), hint_text="e.g. 8080   (empty = any port)", multiline=False,
-                        input_filter="int", input_type="number", font_size=dp(18), size_hint_y=None, height=dp(48),
-                        padding=(dp(12), dp(12)), background_normal="", background_active="",
-                        background_color=self.t_surf2, foreground_color=self.t_txt, hint_text_color=self.t_muted,
-                        cursor_color=self.t_acc)
-        card.add_widget(box)
-        msg = Label(text="", font_size=dp(12), color=(0.90, 0.25, 0.30, 1), size_hint_y=None, height=dp(20))
-        card.add_widget(msg)
-        row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-
-        def apply(*_):
-            raw = box.text.strip()
-            if not raw:
-                self.set_port(None)
-            else:
-                n = int(raw)
-                if not 1 <= n <= 65535:
-                    msg.text = "Port must be 1 - 65535"
-                    return
-                self.set_port(n)
-            self.status_text = ("Port filter: %s. It applies to the next search." % self.port_text)
-            mv.dismiss()
-
-        clear = GhostButton(text="Any port")
-        clear.bind(on_release=lambda *_: (setattr(box, "text", ""), apply()))
-        ok = PillButton(text="Apply")
-        ok.bind(on_release=apply)
-        row.add_widget(clear)
-        row.add_widget(ok)
-        card.add_widget(row)
-        mv.add_widget(card)
-        mv.open()
-        Clock.schedule_once(lambda dt: setattr(box, "focus", True), 0.2)
-
-    # ================================================================== menu
-    def open_menu(self):
-        mv = ModalView(size_hint=(0.9, None), height=dp(620), background="", background_color=(0.05, 0.08, 0.16, 0.45))
-        card = Card(orientation="vertical", padding=dp(16), spacing=dp(10))
-        items = (("Theme / appearance", self.open_theme_dialog),
-                 ("Port for SOCKS5/HTTP:  %s" % self.port_text, self.open_port_dialog),
-                 ("Paste a list from the clipboard", lambda: self.scan(True)),
-                 ("Re-ping all servers", self.reping),
-                 ("Copy Telegram proxy links", lambda: self.copy_all("tg")),
-                 ("Copy config list (v2rayNG / NPV)", lambda: self.copy_all("v2ray")),
-                 ("Share all", self.share_all),
-                 ("Share this VPN (hotspot / Wi-Fi): %s" % ("ON" if en.SHARE["on"] else "OFF"), self.open_share_dialog))
-        for text, fn in items:
-            b = GhostButton(text=text, size_hint_y=None, height=dp(46))
-            b.bind(on_release=lambda *_, f=fn: (mv.dismiss(), f()))
-            card.add_widget(b)
-        note = Label(text="SOCKS5/HTTP: freeproxy.world only.  V2Ray: my subscription (Amin01...) + 2 from GitHub, verified with Xray.\n"
-                          "Ping is measured by this phone. Free proxies can read unencrypted traffic.",
-                     font_size=dp(11), color=self.t_muted, halign="center")
-        note.bind(size=lambda w, s: setattr(w, "text_size", (s[0], None)))
-        card.add_widget(note)
-        mv.add_widget(card)
-        mv.open()
-
-    # ================================================================== share the connection with other devices
-    def _load_share(self):
-        d = self.settings.get("share") or {}
-        en.SHARE["on"] = bool(d.get("on"))
-        try:
-            en.SHARE["port"] = int(d.get("port") or 10809)
-        except (ValueError, TypeError):
-            en.SHARE["port"] = 10809
-        self.settings["share"] = {"on": en.SHARE["on"], "port": en.SHARE["port"]}
-
-    def open_share_dialog(self):
-        s = en.SHARE
-        ips = en.lan_ips()
-        ip = ips[0][1] if ips else None
-        live = ip is not None and en.share_listening(ip)
-        mv = ModalView(size_hint=(0.92, None), height=dp(450), background="", background_color=(0.05, 0.08, 0.16, 0.45))
-        card = Card(orientation="vertical", padding=dp(16), spacing=dp(8))
-        if ip is None:
-            state = "No hotspot / Wi-Fi address found. Turn the phone hotspot ON first."
-        elif live:
-            state = "READY - the proxy is listening."
-        elif s["on"]:
-            state = "Sharing is ON but not listening yet: connect the VPN here (disconnect + connect once)."
-        else:
-            state = "Sharing is OFF."
-        info = ("%s\n\nSOCKS5 proxy for the other device:\nAddress:  %s\nPort:  %d\n(no username / password)\n\n"
-                "1) Hotspot ON (or same Wi-Fi)\n2) Sharing ON, then connect the VPN here\n"
-                "3) Other device: set SOCKS5 proxy to the address + port above.%s"
-                % (state, ip or "-", s["port"],
-                   ("\n\nOther addresses: " + ", ".join("%s=%s" % x for x in ips[1:])) if len(ips) > 1 else ""))
-        lab = Label(text=info, font_size=dp(13), color=self.t_txt, halign="left", valign="top")
-        lab.bind(size=lambda w, sz: setattr(w, "text_size", (sz[0], sz[1])))
-        card.add_widget(lab)
-
-        def toggle(*_):
-            s["on"] = not s["on"]
-            self.settings["share"] = {"on": s["on"], "port": s["port"]}
-            self._save_settings()
-            self.status_text = "Sharing %s. Disconnect and connect the VPN again to apply." % ("ON" if s["on"] else "OFF")
-            mv.dismiss()
-
-        def copy_tg(*_):
-            if ip:
-                self.copy_text("tg://socks?server=%s&port=%d" % (ip, s["port"]), "Telegram proxy link copied.")
-
-        def copy_plain(*_):
-            if ip:
-                self.copy_text("%s:%d" % (ip, s["port"]), "Address copied.")
-
-        for text, fn in (("Turn sharing %s" % ("OFF" if s["on"] else "ON"), toggle),
-                         ("Copy ip:port", copy_plain), ("Copy Telegram link", copy_tg)):
-            b = GhostButton(text=text, size_hint_y=None, height=dp(44))
-            b.bind(on_release=fn)
-            card.add_widget(b)
-        mv.add_widget(card)
-        mv.open()
-
-    # ================================================================== connection screen
-    def _conn(self):
-        return self.root.ids.conn
-
-    def connect_to(self, proxy):
-        if self.engine.state in ("starting", "running"):
-            self.engine.disconnect()
-        self.current = proxy
-        c = self._conn()
-        c.down_hist, c.up_hist, c.error_text, c.ping_text = [], [], "", "-"
-        c.title_text = self._title_of(proxy)
-        c.kind_text = self._kind_of(proxy)
-        self._last_rx = self._last_tx = 0
-        self._last_tick, self._last_ping, self._direct = time.time(), 0.0, None
-        self._go("conn", "left")
-        self.engine.connect(proxy)
-        self._tick(0)
-
-    @staticmethod
-    def _kind_short(proxy):
-        if proxy is None:
-            return ""
-        return (proxy.proto or "v2ray").upper() if proxy.kind == "v2ray" else ("SOCKS5" if proxy.kind == "socks5" else "HTTP")
-
-    @classmethod
-    def _kind_of(cls, proxy):
-        k = cls._kind_short(proxy)
-        if proxy is not None and proxy.kind == "v2ray" and proxy.sec and proxy.sec != "none":
-            k += " " + proxy.sec.upper()
-        return k
-
-    @staticmethod
-    def _title_of(proxy):
-        t = (proxy.name or proxy.addr) if proxy.kind == "v2ray" else "%s  %s" % (proxy.kind.upper(), proxy.addr)
-        return t + ("  (%s)" % proxy.country if proxy.country else "")
-
-    def open_conn(self):
-        if self.current:
-            self._go("conn", "left")
-
-    def back_home(self):
-        self._go("home", "right")                                  # a running VPN stays on
-
-    def toggle_connection(self):
-        if self.engine.state in ("starting", "running"):
-            self.engine.disconnect()
-        elif self.current:
-            self.connect_to(self.current)
-
-    def toggle_local(self):
-        """Local proxy (no VPN): SOCKS5 127.0.0.1:10818 + HTTP 127.0.0.1:10819 - for Psiphon's upstream proxy, Telegram, ..."""
-        if self.local.state in ("running", "starting"):
-            threading.Thread(target=self.local.stop, daemon=True).start()
-        elif self.current:
-            threading.Thread(target=self.local.start, args=(self.current,), daemon=True).start()
-
-    def open_telegram_local(self):
-        """Start the local proxy if needed, then hand 127.0.0.1:10818 (SOCKS5) to Telegram."""
-        if not self.current:
-            return
-
-        def work():
-            if not self.local.running:
-                self.local.start(self.current)
-            if self.local.running:
-                self._ui(self._launch_tg)
-        threading.Thread(target=work, daemon=True).start()
-
-    def _launch_tg(self):
-        link = "tg://socks?server=127.0.0.1&port=%d" % xt.LOCAL_SOCKS
-        if platform == "android":
-            try:
-                android_view(link)
-                return
-            except Exception:
-                pass
-        self.copy_text(link, "Telegram link copied.")
-
-    def copy_current(self):
-        if self.current:
-            self.copy_text(pc.plain_link(self.current), "Config copied.")
-            self._conn().detail_text = "Config copied to the clipboard."
+        self.bind(pos=self._draw, size=self._draw, c1=self._draw, c2=self._draw)
+        self._draw()
+
+    def _draw(self, *_):
+        self.canvas.before.clear()
+        with self.canvas.before:
+            Color(1, 1, 1, 1)
+            Rectangle(pos=self.pos, size=self.size, texture=gradient_texture(self.c1, self.c2, vertical=False))
+
+
+class Radar(FloatLayout):
+    """Animated radar. While a scan runs the sweep spins fast; every probed IP appears as a blip:
+    clean IPs stay as glowing green dots with a pulse ring, failed probes flash red and fade."""
+    title = StringProperty("STANDBY")
+    subtitle = StringProperty("Press Start scan")
+    active = BooleanProperty(False)
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._angle = 90.0
+        self._t = 0.0
+        self._blips = []
+        self._known = set()
+        Clock.schedule_interval(self._tick, 1 / 30.0)
+
+    def reset(self):
+        self._blips = []
+        self._known = set()
+
+    def feed(self, recent):
+        for ip, ok in recent:
+            if ip in self._known:
+                continue
+            self._known.add(ip)
+            h = zlib.crc32(ip.encode())
+            self._blips.append({"a": h % 360, "r": 0.16 + 0.80 * (((h >> 9) % 1000) / 1000.0), "ok": ok, "age": 0.0})
+        good = [b for b in self._blips if b["ok"]]
+        if len(good) > 140:
+            drop = set(map(id, good[: len(good) - 140]))
+            self._blips = [b for b in self._blips if id(b) not in drop]
 
     def _tick(self, dt):
-        s = self.engine.poll()
-        st = s["state"]
-        self.vpn_on = st == "running"
-        self.vpn_kind = self._kind_short(self.current) if self.vpn_on else ""
-        c = self._conn()
-        now = time.time()
-        step = max(0.2, now - self._last_tick)
-        self._last_tick = now
-        if st == "running":
-            down = max(0.0, (s["rx"] - self._last_rx) / step)
-            up = max(0.0, (s["tx"] - self._last_tx) / step)
-            self._last_rx, self._last_tx = s["rx"], s["tx"]
-            c.down_hist = (c.down_hist + [down])[-HIST:]
-            c.up_hist = (c.up_hist + [up])[-HIST:]
-            c.down_text, c.up_text = fmt_bytes(down) + "/s", fmt_bytes(up) + "/s"
-            if now - self._last_ping > 6 and not self._ping_running:
-                self._ping_running = True
-                threading.Thread(target=self._ping_job, daemon=True).start()
-        else:
-            self._last_rx = self._last_tx = 0
-            if st != "starting":
-                c.down_text = c.up_text = "0 B/s"
-        label, ring = {"stopped": ("Disconnected", list(self.t_acc)), "starting": ("Connecting...", AMBER),
-                       "running": ("Connected", GREEN), "error": ("Failed", RED)}.get(st, ("...", GREY))
-        c.ring = list(self.t_acc) if st == "stopped" else ring
-        c.busy = st == "starting"
-        if self.scanning and st != "running":
-            self.hero_text, self.hero_color, self.hero_busy = "Finding servers...", AMBER, True
-        else:
-            self.hero_text, self.hero_color = {"stopped": ("Tap to connect", list(self.t_acc)), "starting": ("Connecting...", AMBER),
-                                               "running": ("Connected", GREEN), "error": ("Connection failed", RED)}.get(
-                st, ("Tap to connect", list(self.t_acc)))
-            self.hero_busy = st == "starting"
-        if st in ("starting", "running"):
-            self.hero_sub = c.title_text if st == "starting" else "%s  -  %s  -  %s" % (c.title_text, c.kind_text, fmt_time(s["uptime"]))
-        elif self.scanning:
-            self.hero_sub = self.status_text
-        else:
-            self.hero_sub = "The best server is picked for you" if not self.current else c.title_text
-        c.big_text = "[b]%s[/b]\n[size=15sp]%s[/size]" % (label, fmt_time(s["uptime"]) if st == "running" else
-                                                         ("simulation" if self.engine.simulated else "tap the button"))
-        if st == "running":
-            c.detail_text = "Used: down %s   up %s   | server tcp %s%s" % (
-                fmt_bytes(s["rx"]), fmt_bytes(s["tx"]), ("%d ms" % self._direct) if self._direct is not None else "-",
-                "   (simulated)" if self.engine.simulated else "")
-        elif st == "starting":
-            c.detail_text = "Starting the Xray core and the VPN tunnel..."
-        elif st == "stopped":
-            c.detail_text = ""
-        c.error_text = (s["error"] + (("\n" + s["log"][-300:]) if s.get("log") else "")) if st == "error" else ""
-        ls = self.local.state
-        c.local_btn = "Stop local proxy" if ls in ("running", "starting") else "Local proxy"
-        c.local_text = {
-            "running": "Local proxy ON\nHTTP    127.0.0.1:%d\nSOCKS5  127.0.0.1:%d\nPsiphon cannot import servers; its only hook is an "
-                       "upstream proxy (Settings > Proxy, wording varies by version) - enter the HTTP address above."
-                       % (xt.LOCAL_HTTP, xt.LOCAL_SOCKS),
-            "starting": "Starting the local proxy...", "error": "Local proxy: " + self.local.error}.get(ls, "")
+        if self.get_root_window() is None or self.width < 10:
+            return
+        self._t += dt
+        self._angle = (self._angle - (150.0 if self.active else 28.0) * dt) % 360
+        for b in self._blips:
+            b["age"] += dt
+        self._blips = [b for b in self._blips if b["ok"] or b["age"] < 1.6]
+        self._draw()
 
-    def _ping_job(self):
+    def _draw(self):
+        c = self.canvas.before
+        c.clear()
+        rad = math.radians
+        with c:
+            Color(0.043, 0.063, 0.125, 1)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(24)])
+            cx, cy = self.center
+            R = min(self.width, self.height) / 2 - dp(34)
+            Color(0.20, 0.85, 0.70, 0.09)
+            Ellipse(pos=(cx - R, cy - R), size=(2 * R, 2 * R))
+            Color(0.25, 0.90, 0.75, 0.32)
+            for k in (1.0, 0.75, 0.5, 0.25):
+                Line(circle=(cx, cy, R * k), width=dp(0.9))
+            Color(0.25, 0.90, 0.75, 0.16)
+            Line(points=[cx - R, cy, cx + R, cy], width=dp(0.8))
+            Line(points=[cx, cy - R, cx, cy + R], width=dp(0.8))
+            # sweep with fading trail
+            steps, span = 26, 72.0
+            for i in range(steps):
+                a0 = rad(self._angle + i * span / steps)
+                a1 = rad(self._angle + (i + 1) * span / steps)
+                Color(0.20, 1.0, 0.75, (0.36 if self.active else 0.22) * (1 - i / steps) ** 1.7)
+                Triangle(points=[cx, cy, cx + R * math.cos(a0), cy + R * math.sin(a0),
+                                 cx + R * math.cos(a1), cy + R * math.sin(a1)])
+            a = rad(self._angle)
+            Color(0.65, 1.0, 0.92, 0.95)
+            Line(points=[cx, cy, cx + R * math.cos(a), cy + R * math.sin(a)], width=dp(1.6))
+            # blips
+            oks = [b for b in self._blips if b["ok"]]
+            pulsing = set(map(id, oks[-25:]))
+            for b in self._blips:
+                ang = rad(b["a"])
+                x = cx + R * b["r"] * math.cos(ang)
+                y = cy + R * b["r"] * math.sin(ang)
+                if b["ok"]:
+                    if id(b) in pulsing:
+                        p = (self._t * 1.5 + b["a"] / 360.0) % 1
+                        Color(0.30, 1.0, 0.60, 0.55 * (1 - p))
+                        Line(circle=(x, y, dp(4) + dp(15) * p), width=dp(1))
+                    Color(0.45, 1.0, 0.65, 1)
+                    Ellipse(pos=(x - dp(3.5), y - dp(3.5)), size=(dp(7), dp(7)))
+                else:
+                    fade = max(0.0, 1 - b["age"] / 1.6)
+                    Color(1.0, 0.35, 0.40, 0.55 * fade)
+                    Ellipse(pos=(x - dp(2.2), y - dp(2.2)), size=(dp(4.4), dp(4.4)))
+            Color(0.65, 1.0, 0.92, 1)
+            Ellipse(pos=(cx - dp(3), cy - dp(3)), size=(dp(6), dp(6)))
+
+
+class Ring(FloatLayout):
+    """Circular progress. Spins while busy with no progress yet, otherwise shows value (0..1)."""
+    value = NumericProperty(0)
+    busy = BooleanProperty(False)
+    text = StringProperty("")
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._rot = 0.0
+        self.bind(pos=self._draw, size=self._draw, value=self._draw, busy=self._draw)
+        Clock.schedule_interval(self._spin, 1 / 30.0)
+        self._draw()
+
+    def _spin(self, dt):
+        if self.busy and self.value <= 0.01 and self.get_root_window() is not None:
+            self._rot = (self._rot + 330 * dt) % 360
+            self._draw()
+
+    def _draw(self, *_):
+        c = self.canvas.before
+        c.clear()
+        with c:
+            cx, cy = self.center
+            r = min(self.size) / 2 - dp(10)
+            w = dp(9)
+            Color(0.90, 0.92, 0.97, 1)
+            Line(circle=(cx, cy, r), width=w)
+            Color(*C_PRIMARY)
+            if self.busy and self.value <= 0.01:
+                Line(circle=(cx, cy, r, self._rot, self._rot + 100), width=w, cap="round")
+            elif self.value > 0.005:
+                Line(circle=(cx, cy, r, 0, 360 * min(1.0, self.value)), width=w, cap="round")
+
+
+class Splash(FloatLayout):
+    """Full-screen animated intro that fades out by itself."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._t = 0.0
+        self._tex = gradient_texture(C_PRIMARY, C_CYAN, vertical=True)
+        self._logo = Label(text="A", bold=True, font_size="46sp", size_hint=(None, None),
+                           size=(dp(96), dp(96)), pos_hint={"center_x": .5, "center_y": .58})
+        self._name = Label(text="AMINIUM STUDIO", bold=True, font_size="24sp", size_hint=(None, None),
+                           size=(dp(300), dp(40)), pos_hint={"center_x": .5, "center_y": .43})
+        self._tag = Label(text="Clean IPs. One tap panels.", font_size="13sp", color=(1, 1, 1, .85),
+                          size_hint=(None, None), size=(dp(300), dp(30)), pos_hint={"center_x": .5, "center_y": .385})
+        for w in (self._logo, self._name, self._tag):
+            self.add_widget(w)
+        self._ev = Clock.schedule_interval(self._tick, 1 / 30.0)
+        Clock.schedule_once(self.dismiss, 2.3)
+
+    def on_touch_down(self, touch):
+        return True
+
+    def on_touch_move(self, touch):
+        return True
+
+    def on_touch_up(self, touch):
+        return True
+
+    def _tick(self, dt):
+        self._t += dt
+        c = self.canvas.before
+        c.clear()
+        with c:
+            Color(1, 1, 1, 1)
+            Rectangle(pos=self.pos, size=self.size, texture=self._tex)
+            cx, cy = self.width / 2, self.height * 0.58
+            for k in range(3):
+                p = (self._t * 0.55 + k / 3.0) % 1
+                Color(1, 1, 1, 0.30 * (1 - p))
+                Line(circle=(cx, cy, dp(50) + dp(120) * p), width=dp(1.4))
+            Color(1, 1, 1, 0.22)
+            RoundedRectangle(pos=(cx - dp(48), cy - dp(48)), size=(dp(96), dp(96)), radius=[dp(30)])
+            bw = dp(180)
+            bx, by = cx - bw / 2, self.height * 0.30
+            Color(1, 1, 1, 0.28)
+            RoundedRectangle(pos=(bx, by), size=(bw, dp(5)), radius=[dp(3)])
+            Color(1, 1, 1, 0.95)
+            RoundedRectangle(pos=(bx, by), size=(max(dp(5), bw * min(1.0, self._t / 2.1)), dp(5)), radius=[dp(3)])
+
+    def dismiss(self, *_):
+        a = Animation(opacity=0, duration=0.5)
+
+        def done(*_):
+            self._ev.cancel()
+            if self.parent:
+                self.parent.remove_widget(self)
+        a.bind(on_complete=done)
+        a.start(self)
+
+
+class TokenScreen(Screen):
+    pass
+
+
+class ScanScreen(Screen):
+    pass
+
+
+class BuildScreen(Screen):
+    pass
+
+
+class OutputScreen(Screen):
+    pass
+
+
+class ManageScreen(Screen):
+    pass
+
+
+# ───────────────────────────── the app ─────────────────────────────
+class AminiumApp(App):
+    title = "Aminium Studio"
+
+    def build(self):
+        Window.clearcolor = (0.957, 0.965, 0.984, 1)
         try:
-            via = self.engine.tunnel_ping()
-            direct = self.engine.direct_ping()
-            self._ui(self._ping_done, via, direct)
-        finally:
-            self._ping_running = False
+            Window.softinput_mode = "below_target"      # keyboard pushes the focused field up
+        except Exception:
+            pass
+        self._ready = False
+        self.cfg = self.load_cfg()
+        self.token = self.cfg.get("token", "")
+        self.email = self.cfg.get("email", "")
+        self.accounts = []
+        self.token_ok = False
+        self.job = None
+        self.ips = []
+        self.rec = None
+        self.out = None
+        self.cur_fmt = "auto"
+        self.log_lines = []
+        self._shown_found = -1
+        self.deployments = core.load_deployments()
 
-    def _ping_done(self, via, direct):
-        self._last_ping = time.time()
-        self._direct = direct
-        self._conn().ping_text = ("%d ms" % via) if via else "no reply"
+        root = Builder.load_string(KV)
+        self.root_widget = root
+        self.sm = root.ids.sm
+        self.sm.transition = SlideTransition(duration=0.22)
+        self.logbar = root.ids.logbar
+        self.hdr_sub = root.ids.hdr_sub
+        for scr in (TokenScreen(), ScanScreen(), BuildScreen(), OutputScreen(), ManageScreen()):
+            self.sm.add_widget(scr)
 
-    # ================================================================== export
-    def copy_text(self, text, msg):
+        self.tabs = {}
+        for name, label, _sub in TABS:
+            tab = NavTab(text=label, target=name)
+            tab.bind(on_release=lambda t: self.goto(t.target))
+            root.ids.nav.add_widget(tab)
+            self.tabs[name] = tab
+
+        root.add_widget(Splash())
+        self._ready = True
+        self.goto("token", animate=False)
+        Clock.schedule_once(lambda dt: self.init_fields(), 0)
+        return root
+
+    # ---------- helpers ----------
+    def cfg_path(self):
+        return core.APP_DIR / "aminium_studio_config.json"
+
+    def load_cfg(self):
         try:
-            Clipboard.copy(text)
-            self.status_text = msg
+            return json.loads(self.cfg_path().read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def save_cfg(self):
+        self.cfg["token"] = self.token
+        self.cfg["email"] = self.email
+        try:
+            core.APP_DIR.mkdir(parents=True, exist_ok=True)
+            self.cfg_path().write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
-            self.status_text = "Copy failed: %s" % e
+            self.log(f"Could not save settings: {e}")
 
-    def copy_all(self, fmt):
-        items = [p for p in self.working if fmt != "v2ray" or p.kind != "v2ray" or p.ok_real or not self.xray_ok][:100]
-        text = pc.export_text(items, fmt)
-        if not text:
-            self.status_text = ("Nothing to export yet - search first." if not items else
-                                "Telegram links need SOCKS5 proxies; none found yet.")
-            return
-        self.copy_text(text, "Copied %d links. Paste into Telegram, or in your VPN app: + > import from clipboard." % len(text.splitlines()))
+    def log(self, msg):
+        def ui(*_):
+            line = str(msg)
+            self.log_lines.append(line)
+            self.log_lines = self.log_lines[-300:]
+            self.logbar.last = line.replace("\n", " ")
+            if line.startswith("ERROR"):
+                self.toast(line[:90])
+        Clock.schedule_once(ui, 0)
 
-    def share_all(self):
-        text = pc.export_text(self.working[:100], "plain")
-        if not text:
-            self.status_text = "Nothing to share yet - search first."
-            return
-        if platform == "android":
+    def toast(self, text):
+        t = ToastLabel(text=text, opacity=0)
+        self.root_widget.add_widget(t)
+        anim = Animation(opacity=1, duration=0.15) + Animation(opacity=1, duration=1.7) + Animation(opacity=0, duration=0.4)
+        anim.bind(on_complete=lambda *_: self.root_widget.remove_widget(t))
+        anim.start(t)
+
+    def show_log(self):
+        box = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(8))
+        from kivy.uix.scrollview import ScrollView
+        sv = ScrollView(bar_width=dp(3))
+        lab = Label(text="\n".join(self.log_lines) or "(empty)", color=C_TEXT, font_size="11sp",
+                    size_hint_y=None, halign="left", valign="top")
+        lab.bind(width=lambda i, w: setattr(i, "text_size", (w, None)),
+                 texture_size=lambda i, s: setattr(i, "height", s[1]))
+        sv.add_widget(lab)
+        box.add_widget(sv)
+        btn = RoundButton(text="Close", height=dp(44))
+        box.add_widget(btn)
+        pop = self.make_popup("Activity log", box, (0.94, 0.8))
+        btn.bind(on_release=lambda *_: pop.dismiss())
+        pop.open()
+
+    def make_popup(self, title, content, size_hint):
+        return Popup(title=title, content=content, size_hint=size_hint, background="",
+                     background_color=(1, 1, 1, 1), title_color=C_TEXT, separator_color=C_PRIMARY)
+
+    def set_status(self, label, text, kind="info"):
+        label.text = text
+        label.color = {"ok": C_OK, "err": C_ERR}.get(kind, C_MUTED)
+
+    def open_url(self, url):
+        try:
+            if platform == "android":
+                from jnius import autoclass  # type: ignore
+                Intent = autoclass("android.content.Intent")
+                Uri = autoclass("android.net.Uri")
+                Activity = autoclass("org.kivy.android.PythonActivity")
+                Activity.mActivity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            else:
+                import webbrowser
+                webbrowser.open(url)
+            return True
+        except Exception as e:
+            from kivy.core.clipboard import Clipboard
+            Clipboard.copy(url)
+            self.log(f"Could not open the browser ({e}). The link was copied - paste it into your browser.")
+            return False
+
+    def goto(self, name, animate=True):
+        order = [t[0] for t in TABS]
+        cur = self.sm.current if self.sm.screen_names else name
+        if animate and name != cur and cur in order:
+            self.sm.transition.direction = "left" if order.index(name) > order.index(cur) else "right"
+        self.sm.current = name
+        for n, tab in self.tabs.items():
+            tab.active = (n == name)
+        self.hdr_sub.text = next(t[2] for t in TABS if t[0] == name)
+        if name == "manage":
+            self.refresh_manage_list()
+        if name == "build":
+            self.refresh_build_summary()
+
+    def find_default_zip(self):
+        dirs = [core.APP_DIR, Path(core.__file__).resolve().parent, Path(__file__).resolve().parent, Path.cwd()]
+        for d in dirs:
+            p = d / "aminium-pages.zip"
+            if p.exists():
+                return str(p)
+        return ""
+
+    def init_fields(self):
+        t = self.sm.get_screen("token")
+        t.ids.f_token.text = self.token
+        t.ids.f_email.text = self.email
+        if self.token:
+            self.set_status(t.ids.lbl_token_state, "Token loaded from this phone. Press 'Save & verify'.")
+        self.roll_all()
+
+    # ---------- step 1: token ----------
+    def open_token_page(self, manual=False):
+        url = core.TOKEN_URL if manual else core.token_template_url()
+        if self.open_url(url):
+            self.toast("Opening Cloudflare...")
+            self.log("Cloudflare token page opened. Press Continue -> Create Token, then copy the token.")
+
+    def paste_token(self):
+        from kivy.core.clipboard import Clipboard
+        txt = (Clipboard.paste() or "").strip()
+        if txt:
+            self.sm.get_screen("token").ids.f_token.text = txt
+            self.toast("Pasted")
+        else:
+            self.toast("Clipboard is empty")
+
+    def on_save_token(self):
+        t = self.sm.get_screen("token")
+        tok = t.ids.f_token.text.strip()
+        if not tok:
+            return self.log("ERROR: paste the API token first.")
+        self.token, self.email = tok, t.ids.f_email.text.strip()
+        self.set_status(t.ids.lbl_token_state, "Checking the token...")
+
+        def work():
             try:
-                android_share(text)
-                return
+                cf = core.CF(self.token, self.log, self.email)
+                info = cf.verify()
+                accs = cf.accounts()
+                if not accs:
+                    raise core.CFError("No account visible to this token (add 'Account Settings: Read').")
+                self.accounts = accs
+                vals = [f"{a['name']} ({a['id'][:6]})" for a in accs]
+
+                def ui(*_):
+                    t.ids.sp_account.values = vals
+                    t.ids.sp_account.text = vals[0]
+                    self.token_ok = True
+                    self.set_status(t.ids.lbl_token_state, f"Token is valid ({info.get('status')}). Continue to the Radar tab.", "ok")
+                    self.save_cfg()
+                    self.toast("Token verified")
+                Clock.schedule_once(ui, 0)
             except Exception as e:
-                self.status_text = "Share failed (%s) - copied instead." % type(e).__name__
-        self.copy_text(text, "Copied %d servers to the clipboard." % len(text.splitlines()))
+                self.log(f"Token check failed: {e}")
+
+                def ui2(*_):
+                    self.token_ok = False
+                    self.set_status(t.ids.lbl_token_state, f"Token check failed: {e}", "err")
+                Clock.schedule_once(ui2, 0)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_forget_token(self):
+        self.token, self.email, self.token_ok = "", "", False
+        self.accounts = []
+        t = self.sm.get_screen("token")
+        t.ids.f_token.text = ""
+        t.ids.f_email.text = ""
+        t.ids.sp_account.values = ["(verify token first)"]
+        t.ids.sp_account.text = "(verify token first)"
+        self.set_status(t.ids.lbl_token_state, "")
+        self.save_cfg()
+        self.log("Token removed from this phone.")
+
+    # ---------- step 2: scan (radar) ----------
+    def scan_form(self):
+        s = self.sm.get_screen("scan")
+        tls = s.ids.sp_conn.text == "TLS"
+        depth = core.DEPTH[s.ids.sp_depth.text]
+        return {
+            "host": core.SPEED_HOST, "port": 443 if tls else 80, "count": depth["count"],
+            "threads": depth["threads"], "timeout": 5.0, "rounds": 3, "target": depth["target"],
+            "mode": "spread", "custom": "", "verify": True, "neighbors": True, "auto": True,
+            "ws": False, "speed": False,
+        }
+
+    def on_scan(self):
+        if self.job and self.job.phase in ("diagnosing", "scanning", "speed", "finishing"):
+            return
+        s = self.sm.get_screen("scan")
+        cfg = core.Config.from_dict(self.scan_form())
+        self.job = core.ScanJob(cfg, self.log)
+        job = self.job
+        self._shown_found = -1
+        s.ids.radar.reset()
+        s.ids.radar.active = True
+        s.ids.radar.title = "SCANNING"
+        s.ids.radar.subtitle = "0 clean IPs found"
+        s.ids.pb_scan.value = 0
+        s.ids.btn_scan.disabled = True
+        s.ids.btn_scan.text = "Scanning..."
+        s.ids.btn_stop.disabled = False
+        s.ids.lbl_ip_empty.text = "Searching..."
+        s.ids.ip_list.clear_widgets()
+        Clock.schedule_once(lambda dt: self.poll_scan(), 0.3)
+
+        def go():
+            try:
+                job.run()
+            except Exception as e:
+                self.log(f"ERROR: scan crashed: {e}")
+            Clock.schedule_once(lambda dt: self.scan_finished(), 0)
+        threading.Thread(target=go, daemon=True).start()
+
+    def on_stop_scan(self):
+        if self.job:
+            self.job.stop.set()
+            self.log("Stopping...")
+
+    PHASE_TITLES = {"diagnosing": "CHECKING NETWORK", "scanning": "SCANNING", "speed": "SPEED TEST",
+                    "finishing": "FINISHING", "done": "COMPLETE", "stopped": "STOPPED", "idle": "STARTING"}
+
+    def poll_scan(self):
+        job = self.job
+        if not job:
+            return
+        s = self.sm.get_screen("scan")
+        snap = job.snapshot()
+        self.update_scan_ui(s, snap)
+        if snap["phase"] in ("diagnosing", "scanning", "speed", "finishing", "idle"):
+            Clock.schedule_once(lambda dt: self.poll_scan(), 0.4)
+
+    def update_scan_ui(self, s, snap):
+        radar = s.ids.radar
+        radar.feed(snap.get("recent", []))
+        radar.title = self.PHASE_TITLES.get(snap["phase"], snap["phase"].upper())
+        radar.subtitle = f"{snap['found']} clean IPs found"
+        s.ids.st_tested.value = f"{snap['tested']}/{snap['total']}" if snap["total"] else str(snap["tested"])
+        s.ids.st_found.value = str(snap["found"])
+        s.ids.st_time.value = str(int(snap["elapsed"]))
+        s.ids.lbl_scan_stats.text = f"{snap['phase']}  -  {snap['tested']} of {snap['total']} tested"
+        if snap["total"]:
+            target = min(1.0, snap["tested"] / snap["total"])
+            Animation(value=target, duration=0.35).start(s.ids.pb_scan)
+        if snap["found"] != self._shown_found:
+            self._shown_found = snap["found"]
+            self.fill_ip_rows(s, snap["results"], limit=8)
+
+    def fill_ip_rows(self, s, results, limit=60):
+        box = s.ids.ip_list
+        box.clear_widgets()
+        ordered = sorted(results, key=lambda r: -r["score"])[:limit]
+        s.ids.lbl_ip_empty.text = "" if ordered else "(none yet)"
+        for r in ordered:
+            meta = f"{r.get('colo') or '--'}   |   {r.get('total', '?')} ms   |   jitter {r.get('jitter', '?')}"
+            box.add_widget(IpRow(ip=r["ip"], meta=meta, score=int(r["score"])))
+
+    def scan_finished(self):
+        s = self.sm.get_screen("scan")
+        s.ids.btn_scan.disabled = False
+        s.ids.btn_scan.text = "Start scan"
+        s.ids.btn_stop.disabled = True
+        s.ids.radar.active = False
+        snap = self.job.snapshot() if self.job else {"results": [], "phase": "done", "tested": 0, "total": 0,
+                                                       "found": 0, "elapsed": 0, "recent": []}
+        self.update_scan_ui(s, snap)
+        results = sorted(snap["results"], key=lambda r: -r["score"])
+        self.ips = [r["ip"] for r in results]
+        self.fill_ip_rows(s, results, limit=60)
+        if not results:
+            s.ids.lbl_ip_empty.text = "Nothing found - see the log (tap the bar above the tabs)."
+        s.ids.pb_scan.value = 1.0
+        s.ids.radar.title = "COMPLETE" if results else "NO RESULT"
+        self.log(f"Finished: {len(self.ips)} clean IPs.")
+        self.toast(f"{len(self.ips)} clean IPs found")
+
+    def copy_ips(self):
+        if not self.ips:
+            return self.toast("No IPs yet")
+        from kivy.core.clipboard import Clipboard
+        Clipboard.copy("\n".join(self.ips))
+        self.toast("IPs copied")
+
+    # ---------- step 3: build ----------
+    def roll_all(self):
+        b = self.sm.get_screen("build")
+        b.ids.f_project.text = core.rnd_name()
+        b.ids.f_pass.text = core.rnd(20)
+        b.ids.f_panel.text = "/" + core.rnd(10, core.LOWER)
+        self._ws_path = "/stream/" + core.rnd(18, core.LOWER)
+        self._cron = core.rnd(24)
+        self._uuid = str(uuidlib.uuid4())
+        if not b.ids.f_source.text:
+            b.ids.f_source.text = self.find_default_zip()
+
+    def pick_source_file(self):
+        found = self.find_default_zip()
+        b = self.sm.get_screen("build")
+        if found and not b.ids.f_source.text:
+            b.ids.f_source.text = found
+            return self.toast("Found aminium-pages.zip")
+        try:
+            from kivy.uix.filechooser import FileChooserListView
+            start = next((p for p in ("/storage/emulated/0/Download", "/sdcard/Download", str(core.APP_DIR),
+                                      os.path.expanduser("~")) if os.path.isdir(p)), "/")
+            box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(6))
+            fc = FileChooserListView(path=start, filters=["*.zip"])
+            box.add_widget(fc)
+            row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+            ok = RoundButton(text="Select")
+            cancel = RoundButton(text="Cancel", kind="soft")
+            row.add_widget(ok)
+            row.add_widget(cancel)
+            box.add_widget(row)
+            pop = self.make_popup("Choose aminium-pages.zip", box, (0.95, 0.85))
+
+            def choose(*_):
+                if fc.selection:
+                    b.ids.f_source.text = fc.selection[0]
+                pop.dismiss()
+            ok.bind(on_release=choose)
+            cancel.bind(on_release=lambda *_: pop.dismiss())
+            pop.open()
+        except Exception as e:
+            self.log(f"File picker unavailable ({e}). Bundle aminium-pages.zip next to main.py when building the APK.")
+
+    def refresh_build_summary(self):
+        b = self.sm.get_screen("build")
+        n = len(self.ips)
+        tls = self.sm.get_screen("scan").ids.sp_conn.text == "TLS"
+        ports = len(core.TLS_PORTS if tls else core.PLAIN_PORTS)
+        b.ids.lbl_build_sum.text = (f"{n} clean IPs (+ your worker's own address)  x  {ports} ports  x  2 protocols"
+                                    f"  =  up to {(n + 1) * ports * 2} configs.   Connection: {'TLS' if tls else 'No TLS'}")
+
+    def on_build(self):
+        b = self.sm.get_screen("build")
+        project = b.ids.f_project.text.strip().lower()
+        source = b.ids.f_source.text.strip()
+        if not self.token:
+            return self.log("ERROR: add and verify your Cloudflare token first (Token tab).")
+        if not self.ips:
+            return self.log("ERROR: no clean IPs yet - run the Radar scan first.")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,56}", project or ""):
+            return self.log("ERROR: project name: lowercase letters, digits and '-' only.")
+        if not source or not Path(source).exists():
+            return self.log("ERROR: source zip not found - tap Pick, or bundle aminium-pages.zip in the APK.")
+        if not b.ids.f_pass.text:
+            return self.log("ERROR: ADMIN_PASSWORD is empty.")
+        panel = b.ids.f_panel.text.strip()
+        if panel and not panel.startswith("/"):
+            panel = "/" + panel
+            b.ids.f_panel.text = panel
+        mode = "workers" if b.ids.sp_mode.text.startswith("Workers") else "pages"
+        tls = self.sm.get_screen("scan").ids.sp_conn.text == "TLS"
+        form = {
+            "pass": b.ids.f_pass.text, "ws_path": self._ws_path, "cron": self._cron, "uuid": self._uuid,
+            "decoy": "", "tg_token": "", "tg_secret": "", "tg_admins": "", "domain": b.ids.f_domain.text.strip().lower(),
+            "d1": True, "verify_ws": True, "scan": self.scan_form(), "ips": list(self.ips), "keep": 100, "tls": tls,
+        }
+        b.ids.btn_build.disabled = True
+        b.ids.btn_build.text = "Building..."
+        b.ids.ring.value = 0
+        b.ids.ring.busy = True
+        b.ids.ring.text = ""
+
+        def stage(text, frac):
+            def ui(*_):
+                b.ids.lbl_build_stage.text = text
+                b.ids.ring.text = f"{int(frac * 100)}%"
+                Animation(value=frac, duration=0.4).start(b.ids.ring)
+            Clock.schedule_once(ui, 0)
+
+        def reset_button(msg=None):
+            b.ids.btn_build.disabled = False
+            b.ids.btn_build.text = "Build my configs"
+            b.ids.ring.busy = False
+            if msg:
+                b.ids.lbl_build_stage.text = msg
+
+        def work():
+            try:
+                result = core.run_build(self.token, self.email, self.accounts, None, project, source, panel, mode,
+                                        form, self.log, stage)
+                self.rec, self.out = result["rec"], result["out"]
+                self.deployments = core.add_deployment(self.rec)
+
+                def ui(*_):
+                    reset_button("Done!")
+                    b.ids.ring.text = "100%"
+                    Animation(value=1.0, duration=0.3).start(b.ids.ring)
+                    self.render_output()
+                    self.goto("output")
+                Clock.schedule_once(ui, 0)
+            except Exception as e:
+                self.log(f"ERROR: {e}")
+                Clock.schedule_once(lambda dt: reset_button("Something went wrong - tap the log bar for details."), 0)
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- step 4: configs ----------
+    def render_output(self):
+        o = self.sm.get_screen("output")
+        if not self.rec:
+            o.ids.lbl_out_info.text = "Nothing built yet."
+            return
+        n = len(self.out["links"]) if self.out else 0
+        o.ids.lbl_out_info.text = (f"{n} configs  -  {len(self.rec.get('ips', []))} clean IPs\n"
+                                   f"Panel:  {self.rec['base']}{self.rec['panel_path']}\nPassword:  {self.rec['password']}")
+        self.on_pick_fmt(o.ids.sp_fmt.text)
+
+    def on_pick_fmt(self, label):
+        if not getattr(self, "_ready", False):
+            return
+        try:
+            o = self.sm.get_screen("output")
+        except Exception:
+            return
+        key, _, q = next((x for x in FORMATS_UI if x[1] == label), FORMATS_UI[0])
+        self.cur_fmt = key
+        if not self.out:
+            o.ids.f_sub_url.text = ""
+            o.ids.f_preview.text = "No configs available yet."
+            return
+        o.ids.f_sub_url.text = self.out["sub"] + ("" if key == "auto" else q)
+        o.ids.f_preview.text = (self.out["text"].get(key) or "(empty)")[:4000]
+
+    def copy_sub_url(self):
+        o = self.sm.get_screen("output")
+        if not o.ids.f_sub_url.text:
+            return self.toast("Nothing to copy yet")
+        from kivy.core.clipboard import Clipboard
+        Clipboard.copy(o.ids.f_sub_url.text)
+        self.toast("Link copied")
+
+    def save_all_configs(self):
+        if not (self.rec and self.out):
+            return self.log("Nothing to save yet.")
+        try:
+            folder = core.save_all(self.rec, self.out, self.log)
+            self.log(f"Saved to {folder}")
+            self.toast("Saved on this phone")
+        except Exception as e:
+            self.log(f"ERROR: save failed: {e}")
+
+    # ---------- "Saved" screen ----------
+    def refresh_manage_list(self):
+        m = self.sm.get_screen("manage")
+        box = m.ids.manage_list
+        box.clear_widgets()
+        self.deployments = core.load_deployments()
+        if not self.deployments:
+            box.add_widget(Card_empty())
+            return
+        total = len(self.deployments)
+        for i, rec in enumerate(reversed(self.deployments)):
+            real_index = total - 1 - i
+            title = rec.get("label") or rec.get("project", "(unnamed)")
+            sub = f"{rec.get('base', '')}\ncreated {rec.get('created', '')}   |   {len(rec.get('ips', []))} clean IPs"
+            box.add_widget(DeployRow(title=title, subtitle=sub, index=real_index))
+
+    def load_deployment(self, index):
+        items = core.load_deployments()
+        index = int(index)
+        if not (0 <= index < len(items)):
+            return
+        rec = items[index]
+        self.rec = rec
+        self.log(f"Loading configs of {rec['project']} ...")
+
+        def work():
+            try:
+                out = core.fetch_configs(rec["sub"], self.log) if rec.get("sub") else None
+            except Exception as e:
+                self.log(f"Could not load: {e}")
+                out = None
+            self.out = out
+
+            def ui(*_):
+                self.render_output()
+                self.goto("output")
+            Clock.schedule_once(ui, 0)
+        threading.Thread(target=work, daemon=True).start()
+
+    def rename_deployment_prompt(self, index):
+        items = core.load_deployments()
+        index = int(index)
+        if not (0 <= index < len(items)):
+            return
+        content = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(12))
+        ti = RoundInput(text=items[index].get("label") or items[index].get("project", ""))
+        content.add_widget(ti)
+        btn = RoundButton(text="Save")
+        content.add_widget(btn)
+        popup = self.make_popup("Rename this config", content, (0.88, 0.34))
+
+        def do_save(*_):
+            core.rename_deployment(items, index, ti.text.strip() or items[index].get("project", ""))
+            popup.dismiss()
+            self.refresh_manage_list()
+        btn.bind(on_release=do_save)
+        popup.open()
+
+    def delete_deployment_prompt(self, index):
+        items = core.load_deployments()
+        index = int(index)
+        if not (0 <= index < len(items)):
+            return
+        content = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(12))
+        name = items[index].get("label") or items[index].get("project", "")
+        content.add_widget(Label(text=f"Remove \"{name}\" from this list?\n(The Cloudflare project itself is NOT touched.)",
+                                 color=C_TEXT, font_size="13sp", halign="center"))
+        row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        b_yes = RoundButton(text="Delete", kind="danger")
+        b_no = RoundButton(text="Cancel", kind="soft")
+        row.add_widget(b_yes)
+        row.add_widget(b_no)
+        content.add_widget(row)
+        popup = self.make_popup("Confirm delete", content, (0.88, 0.38))
+
+        def do_delete(*_):
+            core.delete_deployment(items, index, log=self.log, also_remove_remote=False)
+            popup.dismiss()
+            self.refresh_manage_list()
+        b_yes.bind(on_release=do_delete)
+        b_no.bind(on_release=lambda *_: popup.dismiss())
+        popup.open()
+
+
+def Card_empty():
+    c = Card()
+    lab = Label(text="No configs built yet.", color=C_MUTED, size_hint_y=None, height=dp(40))
+    c.add_widget(lab)
+    return c
 
 
 if __name__ == "__main__":
-    AmizooApp().run()
+    AminiumApp().run()
