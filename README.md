@@ -1,59 +1,59 @@
-# Aether WARP — پورت Kivy/Android
+# Aminium Studio - Kivy / Android port
 
-این پروژه پورت ابزار دسکتاپ `aether_tool2.py` (Tkinter/ویندوز) به **Kivy** برای ساخت یک اپ اندروید (API پایین تا بالا، از جمله اندروید ۱۶/API 34+) است، همراه با بیلد خودکار APK روی GitHub Actions.
+## What changed vs. the desktop app
+- **Only functional addition**: a **"My configs"** screen (`ManageScreen` in `main.py`) that lists
+  every deployment ever built on the device, lets you **load** it back into step 4, **rename** its
+  label, or **delete** it from the local list. All scanning / Cloudflare / config-generation logic
+  is byte-for-byte the same as the desktop app - it was only moved out of the tkinter classes into
+  plain functions in `aminium_core.py` so the Kivy screens can call it.
+- The UI itself is rewritten in Kivy (`main.py` + the `KV` string inside it) because `customtkinter`
+  does not run on Android; nothing about *what* the app does was changed, only the toolkit.
 
-## ساختار پروژه
+## Files
+| File | Purpose |
+|---|---|
+| `aminium_core.py` | Unmodified scanner + Cloudflare API client + config/QR generation, pulled out of the original script, plus the new `load_deployments / rename_deployment / delete_deployment` helpers. |
+| `main.py` | Kivy app: Token → Clean IPs → Build → Configs (same 4 steps) + My configs. |
+| `buildozer.spec` | Build recipe, targets **Android 14 (API 34)**, `minapi 24`. |
+| `github_uploader.py` | Separate **desktop** tool (own Tk GUI) to push the built APK to a GitHub Release with a token. |
 
-```
-warp-kivy/
-├── main.py                  # اپ Kivy (۵ تب: Connect, Account, Link, Scan, Settings)
-├── warpcore.py               # منطق شبکه (ثبت‌نام WARP، اسکن اندپوینت، SOCKS5...) - بدون وابستگی به GUI
-├── android_bridge.py         # پل pyjnius برای صحبت با VpnService اندروید
-├── android_src/.../VpnTunnelService.java   # VpnService واقعی اندروید (همان چیزی که آیکون کلید را نشان می‌دهد)
-├── extra_manifest.xml        # تگ <service> که باید به AndroidManifest اضافه شود
-├── buildozer.spec            # تنظیمات بیلد اندروید
-├── download_binaries.sh      # دانلود/بیلد usque و tun2socks برای arm64/armv7
-├── .github/workflows/build.yml  # بیلد خودکار APK در GitHub Actions
-└── requirements.txt           # برای تست روی دسکتاپ (بدون اندروید)
-```
-
-## این چیزی که «واقعی» است و چیزی که نیاز به تست روی گوشی دارد
-
-**کاملاً کار می‌کند و تست‌شده (منطق خالص پایتون، بدون وابستگی به Kivy/اندروید):**
-- `warpcore.py`: ثبت‌نام اکانت WARP از API واقعی Cloudflare، ساخت/پارس لینک `aether://`، اسکن اندپوینت با تایید کلید pin شده، handshake SOCKS5 با دست (بدون کتابخانه)، `socks5_trace` برای چک کردن `warp=on`.
-- این فایل با `python3 -m py_compile` و بازبینی دستی چک شده.
-
-**نوشته‌شده، منطقی و بر پایهٔ همان الگوی اپ‌های معروف (shadowsocks-android، v2rayNG) ولی روی گوشی واقعی تست نشده است، چون این محیط Kivy نصب یا اندروید در اختیار ندارد:**
-- `main.py` (رابط Kivy) — سینتکسش چک شده ولی اجرای واقعی GUI تست نشده.
-- `VpnTunnelService.java` — الگوی استاندارد `VpnService` + `tun2socks` است (همان روشی که اکثر اپ‌های SOCKS-VPN اندرویدی استفاده می‌کنند) ولی حتماً باید روی گوشی واقعی دیباگ شود (از طریق `adb logcat`).
-
-یعنی: بخش «ثبت‌نام اکانت / ساخت لینک / اسکن اندپوینت» صد در صد واقعی و کاربردی است. بخش «تونل سراسری با آیکون کلید» (VpnService) هم واقعی پیاده‌سازی شده (نه شبیه‌سازی)، اما چون اینجا گوشی اندروید در دسترس نیست، احتمال نیاز به یکی‌دو دور دیباگ روی دستگاه واقعی هست — طبیعی‌ترین نقطهٔ خطا معمولاً نام فلگ‌های خط فرمان `tun2socks` است که ممکن است بین نسخه‌ها کمی فرق کند (در `VpnTunnelService.java` با کامنت مشخص شده کجا باید اصلاح شود).
-
-## چطور آیکون کلید (VPN) ظاهر می‌شود؟
-
-1. `usque` به‌عنوان یک پراکسی SOCKS5 محلی روی `127.0.0.1:PORT` اجرا می‌شود (دقیقاً مثل نسخهٔ ویندوز).
-2. وقتی تست اتصال (`warp=on`) موفق شد، اپ مجوز VPN اندروید را درخواست می‌کند (`VpnService.prepare`).
-3. با تایید کاربر، `VpnTunnelService` یک رابط TUN واقعی با مسیر `0.0.0.0/0` می‌سازد — **همین مرحله است که آیکون کلید را در نوار وضعیت نشان می‌دهد** — و فایل‌دیسکریپتور آن را به `tun2socks` می‌دهد تا همهٔ ترافیک گوشی را به همان SOCKS5 بفرستد.
-
-## بیلد APK با GitHub Actions
-
-1. یک ریپوی جدید در گیت‌هاب بساز و همهٔ این پوشه را push کن.
-2. وارد تب **Actions** شو — ورک‌فلو `Build Android APK` خودکار اجرا می‌شود (روی هر push به `main`/`master`، یا دستی از طریق «Run workflow»).
-3. در پایان بیلد، فایل APK به‌عنوان **Artifact** به اسم `aether-warp-apk` قابل دانلود است.
-
-نکته: مرحلهٔ `download_binaries.sh` تلاش می‌کند باینری‌های `usque` و `tun2socks` را برای arm64/armv7 از ریلیزهای گیت‌هاب‌شان دانلود کند و اگر پیدا نشد، از سورس با Go کراس-کامپایل می‌کند. اگر نام asset ها در ریلیزهای بالادستی عوض شده باشد، لاگ همان استپ در Actions دقیقاً می‌گوید کدام باینری پیدا نشد — کافی‌ست pattern را در `download_binaries.sh` اصلاح کنی.
-
-## تست روی دسکتاپ (بدون اندروید) قبل از بیلد
-
+## Building the APK
 ```bash
-pip install -r requirements.txt
-python3 main.py
+pip install buildozer cython
+# put your panel source next to main.py first:
+cp /path/to/aminium-pages.zip .
+buildozer -v android debug
+# output: bin/aminiumstudio-1.0.0-arm64-v8a_armeabi-v7a-debug.apk
+```
+First run downloads the Android SDK/NDK (several GB) - only needed once.
+
+For a **release** build (needed for the Play Store, or any store-signed install):
+```bash
+buildozer android release
+# then sign + zipalign with your own keystore (see buildozer's own docs: the
+# android.keystore / android.keyalias lines in buildozer.spec)
 ```
 
-روی دسکتاپ بخش VPN سیستمی به‌صورت خودکار غیرفعال می‌ماند (چون `jnius`/اندروید در دسترس نیست) و فقط پراکسی SOCKS5 محلی اجرا می‌شود — برای تست تب‌های Account / Link / Scan / Connect کافی است.
+## A note on the install-time warning
+A plain, self-signed **debug** APK installed outside the Play Store will normally trigger Android's
+"unknown app" / Play Protect notice - that is expected behavior for *any* sideloaded app, not a
+flag on this app specifically, and it is not something that can be removed by changing the app's
+code. The two things that actually reduce it are outside the scope of a build script:
+1. A **release build signed with your own long-lived keystore** (not the debug key) - lets Play
+   Protect build a reputation for that signature over time.
+2. **Publishing through Google Play** (even as an internal/closed test track) - Play-distributed
+   apps go through Play Protect's pre-review and do not show the "unknown sources" warning at all.
+I didn't add anything that tries to suppress or spoof that warning - that would mean hiding the
+app's behavior from a security scanner, which isn't something I can help build, independent of the
+app's own purpose.
 
-## محدودیت‌ها و نکات مهم
-
-- **`android.api`** روی ۳۴ تنظیم شده (جدیدترین SDK پایدار در زمان نوشتن این ابزار). وقتی API رسمی اندروید ۱۶ منتشر/پایدار شد، فقط کافیست در `buildozer.spec` مقدار `android.api` را بالا ببری — بقیهٔ کد تغییری لازم ندارد. `android.minapi = 21` یعنی روی نسخه‌های خیلی قدیمی‌تر اندروید هم نصب می‌شود.
-- ثبت‌نام اکانت WARP از همان API داخلی‌ای استفاده می‌کند که اپ رسمی Cloudflare WARP استفاده می‌کند (نه یک حفره امنیتی) — ولی استفادهٔ زیاد/خودکار از آن می‌تواند مشمول rate-limit یا مسدودسازی از سمت Cloudflare شود؛ مسئولیت رعایت قوانین استفادهٔ سرویس با کاربر است.
-- اگر `android.extra_manifest_xml` در نسخهٔ p4a که GitHub Actions دانلود می‌کند پشتیبانی نشود، بیلد موفق می‌شود ولی تگ `<service>` اضافه نمی‌شود و اتصال VPN سیستمی کار نخواهد کرد. در این صورت ساده‌ترین راه‌حل: بعد از اولین بیلد، فایل `.buildozer/android/platform/build-*/dists/aetherwarp/src/main/AndroidManifest.xml` را باز کن، محتوای `extra_manifest.xml` را دستی داخل تگ `<application>` بچسبان، و با `buildozer android debug` دوباره بیلد کن.
+## Uploading a build to GitHub automatically
+```bash
+pip install requests
+python github_uploader.py
+```
+Enter a GitHub **personal access token** (classic PAT with the `repo` scope, or a fine-grained PAT
+with "Contents: Read and write" on the target repo), the repo owner/name, a release tag, and the
+`.apk` file - then press **Upload to GitHub**. It creates the release if it doesn't exist yet and
+(re)uploads the file as a release asset. Tick "Remember on this PC" to save those fields (including
+the token) in `~/.aminium_github_uploader.json` on that machine only.
