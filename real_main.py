@@ -52,15 +52,15 @@ if platform == "android":
         pass
 
 # ───────────────────────────── palette ─────────────────────────────
-C_PRIMARY = (0.49, 0.36, 0.98, 1)     # violet
-C_CYAN = (0.13, 0.83, 0.93, 1)        # aqua
-C_TEXT = (0.94, 0.96, 1.00, 1)
-C_MUTED = (0.60, 0.66, 0.79, 1)
-C_OK = (0.25, 0.85, 0.55, 1)
-C_ERR = (1.00, 0.42, 0.46, 1)
-C_SURFACE = (0.075, 0.095, 0.185, 1)  # cards / popups
-C_FIELD = (0.045, 0.058, 0.125, 1)    # inputs
-C_BG = (0.028, 0.038, 0.085, 1)
+C_PRIMARY = (0.07, 0.58, 0.34, 1)     # deep green
+C_CYAN = (0.20, 0.74, 0.45, 1)        # fresh mint-green accent
+C_TEXT = (0.07, 0.20, 0.13, 1)
+C_MUTED = (0.36, 0.50, 0.42, 1)
+C_OK = (0.07, 0.58, 0.30, 1)
+C_ERR = (0.82, 0.20, 0.25, 1)
+C_SURFACE = (1.0, 1.0, 1.0, 1)        # cards / popups
+C_FIELD = (0.94, 0.98, 0.95, 1)    # inputs
+C_BG = (0.95, 0.98, 0.96, 1)
 
 TABS = [
     ("token", "Token", "Step 1  -  Connect Cloudflare"),
@@ -95,12 +95,12 @@ def gradient_texture(c1, c2, vertical=True):
 # ───────────────────────────── KV (layout + styles) ─────────────────────────────
 KV = r"""
 #:import dp kivy.metrics.dp
-#:set C_PRIMARY (0.49, 0.36, 0.98, 1)
-#:set C_CYAN (0.13, 0.83, 0.93, 1)
-#:set C_TEXT (0.94, 0.96, 1.00, 1)
-#:set C_MUTED (0.60, 0.66, 0.79, 1)
-#:set C_SURFACE (0.075, 0.095, 0.185, 1)
-#:set C_FIELD (0.045, 0.058, 0.125, 1)
+#:set C_PRIMARY (0.07, 0.58, 0.34, 1)
+#:set C_CYAN (0.20, 0.74, 0.45, 1)
+#:set C_TEXT (0.07, 0.20, 0.13, 1)
+#:set C_MUTED (0.36, 0.50, 0.42, 1)
+#:set C_SURFACE (1, 1, 1, 1)
+#:set C_FIELD (0.94, 0.98, 0.95, 1)
 
 <H1@Label>:
     bold: True
@@ -114,7 +114,7 @@ KV = r"""
 
 <Body@Label>:
     font_size: "13sp"
-    color: 0.82, 0.87, 0.96, 1
+    color: 0.15, 0.28, 0.20, 1
     size_hint_y: None
     height: self.texture_size[1] + dp(2)
     halign: "left"
@@ -155,7 +155,7 @@ KV = r"""
     height: self.minimum_height
     canvas.before:
         Color:
-            rgba: 0, 0, 0, 0.35
+            rgba: 0.05, 0.40, 0.20, 0.10
         RoundedRectangle:
             pos: self.x, self.y - dp(3)
             size: self.size
@@ -167,12 +167,12 @@ KV = r"""
             size: self.size
             radius: [dp(22)]
         Color:
-            rgba: 1, 1, 1, 0.07
+            rgba: 0.10, 0.60, 0.35, 0.16
         Line:
             rounded_rectangle: self.x, self.y, self.width, self.height, dp(22)
             width: dp(1)
         Color:
-            rgba: 0.49, 0.36, 0.98, 0.55
+            rgba: 0.12, 0.68, 0.40, 0.95
         RoundedRectangle:
             pos: self.x + dp(22), self.top - dp(2)
             size: self.width - dp(44), dp(2)
@@ -186,7 +186,7 @@ KV = r"""
     color: self.fg
     canvas.before:
         Color:
-            rgba: (0.49, 0.36, 0.98, 0.28) if (self.kind == "primary" and not self.disabled) else (0, 0, 0, 0)
+            rgba: (0.10, 0.62, 0.36, 0.26) if (self.kind == "primary" and not self.disabled) else (0, 0, 0, 0)
         RoundedRectangle:
             pos: self.x - dp(2), self.y - dp(4)
             size: self.width + dp(4), self.height + dp(4)
@@ -219,23 +219,23 @@ KV = r"""
     background_active: ""
     background_disabled_normal: ""
     background_color: 0, 0, 0, 0
-    foreground_color: 0.97, 0.98, 1, 1
-    disabled_foreground_color: 0.80, 0.85, 0.95, 1
+    foreground_color: 0.07, 0.20, 0.13, 1
+    disabled_foreground_color: 0.30, 0.42, 0.35, 1
     cursor_color: C_CYAN
     cursor_width: dp(2)
-    hint_text_color: 0.58, 0.64, 0.80, 1
-    selection_color: 0.13, 0.83, 0.93, 0.28
+    hint_text_color: 0.52, 0.64, 0.56, 1
+    selection_color: 0.20, 0.74, 0.45, 0.30
     font_size: "15sp"
     padding: [dp(14), max(dp(10), (self.height - self.line_height) / 2)]
     canvas.before:
         Color:
-            rgba: (0.06, 0.08, 0.17, 1) if self.focus else C_FIELD
+            rgba: (1, 1, 1, 1) if self.focus else C_FIELD
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(14)]
         Color:
-            rgba: C_CYAN if self.focus else (1, 1, 1, 0.10)
+            rgba: C_CYAN if self.focus else (0.10, 0.60, 0.35, 0.28)
         Line:
             rounded_rectangle: self.x, self.y, self.width, self.height, dp(14)
             width: dp(1.4) if self.focus else dp(1)
@@ -246,7 +246,7 @@ KV = r"""
     background_normal: ""
     background_down: ""
     background_color: 0, 0, 0, 0
-    color: 0.97, 0.98, 1, 1
+    color: 0.07, 0.20, 0.13, 1
     font_size: "15sp"
     halign: "left"
     valign: "middle"
@@ -260,7 +260,7 @@ KV = r"""
             size: self.size
             radius: [dp(14)]
         Color:
-            rgba: 1, 1, 1, 0.10
+            rgba: 0.10, 0.60, 0.35, 0.28
         Line:
             rounded_rectangle: self.x, self.y, self.width, self.height, dp(14)
             width: dp(1)
@@ -273,8 +273,8 @@ KV = r"""
 <SpinnerOption>:
     background_normal: ""
     background_down: ""
-    background_color: (0.22, 0.18, 0.48, 1) if self.state == "down" else (0.09, 0.11, 0.22, 1)
-    color: 0.97, 0.98, 1, 1
+    background_color: (0.80, 0.94, 0.85, 1) if self.state == "down" else (1, 1, 1, 1)
+    color: 0.07, 0.20, 0.13, 1
     size_hint_y: None
     height: dp(44)
     font_size: "15sp"
@@ -284,7 +284,7 @@ KV = r"""
     height: dp(8)
     canvas:
         Color:
-            rgba: 1, 1, 1, 0.08
+            rgba: 0.10, 0.60, 0.35, 0.14
         RoundedRectangle:
             pos: self.pos
             size: self.size
@@ -307,7 +307,7 @@ KV = r"""
             size: self.size
             radius: [dp(18)]
         Color:
-            rgba: 1, 1, 1, 0.07
+            rgba: 0.10, 0.60, 0.35, 0.16
         Line:
             rounded_rectangle: self.x, self.y, self.width, self.height, dp(18)
             width: dp(1)
@@ -328,7 +328,7 @@ KV = r"""
     color: C_CYAN if self.active else C_MUTED
     canvas.before:
         Color:
-            rgba: (0.49, 0.36, 0.98, 0.22) if self.active else (0, 0, 0, 0)
+            rgba: (0.12, 0.68, 0.40, 0.14) if self.active else (0, 0, 0, 0)
         RoundedRectangle:
             pos: self.x + dp(6), self.y + dp(8)
             size: self.width - dp(12), self.height - dp(16)
@@ -353,7 +353,7 @@ KV = r"""
             size: self.size
             radius: [dp(14)]
         Color:
-            rgba: 1, 1, 1, 0.06
+            rgba: 0.10, 0.60, 0.35, 0.16
         Line:
             rounded_rectangle: self.x, self.y, self.width, self.height, dp(14)
             width: dp(1)
@@ -380,10 +380,10 @@ KV = r"""
         font_size: "15sp"
         size_hint_x: None
         width: dp(46)
-        color: (0.25, 0.90, 0.58, 1) if root.score >= 70 else ((1, 0.78, 0.30, 1) if root.score >= 40 else (1, 0.45, 0.48, 1))
+        color: (0.05, 0.50, 0.25, 1) if root.score >= 70 else ((0.72, 0.46, 0.02, 1) if root.score >= 40 else (0.78, 0.18, 0.22, 1))
         canvas.before:
             Color:
-                rgba: (0.08, 0.30, 0.22, 1) if root.score >= 70 else ((0.32, 0.25, 0.07, 1) if root.score >= 40 else (0.34, 0.11, 0.14, 1))
+                rgba: (0.84, 0.96, 0.88, 1) if root.score >= 70 else ((1, 0.94, 0.78, 1) if root.score >= 40 else (1, 0.88, 0.89, 1))
             RoundedRectangle:
                 pos: self.x, self.y + dp(8)
                 size: self.width, self.height - dp(16)
@@ -447,7 +447,7 @@ KV = r"""
     padding: dp(30), 0, dp(14), 0
     canvas.before:
         Color:
-            rgba: 0.02, 0.03, 0.07, 1
+            rgba: 0.89, 0.96, 0.91, 1
         Rectangle:
             pos: self.pos
             size: self.size
@@ -474,13 +474,13 @@ KV = r"""
     color: 1, 1, 1, 1
     canvas.before:
         Color:
-            rgba: 0.13, 0.15, 0.30, 0.97
+            rgba: 0.06, 0.42, 0.24, 0.97
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(18)]
         Color:
-            rgba: 0.13, 0.83, 0.93, 0.7
+            rgba: 0.35, 0.82, 0.55, 0.8
         Line:
             rounded_rectangle: self.x, self.y, self.width, self.height, dp(18)
             width: dp(1.1)
@@ -492,14 +492,14 @@ KV = r"""
         text: root.title
         bold: True
         font_size: "13sp"
-        color: 0.55, 1, 0.88, 1
+        color: 0.05, 0.50, 0.28, 1
         size_hint: None, None
         size: self.texture_size
         pos_hint: {"center_x": .5, "top": .975}
     Label:
         text: root.subtitle
         font_size: "12sp"
-        color: 0.70, 0.80, 0.90, 1
+        color: 0.30, 0.44, 0.36, 1
         size_hint: None, None
         size: self.texture_size
         pos_hint: {"center_x": .5, "y": .03}
@@ -519,12 +519,12 @@ FloatLayout:
         orientation: "vertical"
         canvas.before:
             Color:
-                rgba: 0.028, 0.038, 0.085, 1
+                rgba: 0.95, 0.98, 0.96, 1
             Rectangle:
                 pos: self.pos
                 size: self.size
             Color:
-                rgba: 0.49, 0.36, 0.98, 0.05
+                rgba: 0.20, 0.74, 0.45, 0.09
             Ellipse:
                 pos: self.x - self.width * 0.55, self.top - self.width * 0.75
                 size: self.width * 1.3, self.width * 1.3
@@ -535,7 +535,7 @@ FloatLayout:
                 pos: self.x - self.width * 0.25, self.top - self.width * 0.45
                 size: self.width * 0.7, self.width * 0.7
             Color:
-                rgba: 0.13, 0.83, 0.93, 0.04
+                rgba: 0.55, 0.90, 0.70, 0.12
             Ellipse:
                 pos: self.right - self.width * 0.75, self.y - self.width * 0.55
                 size: self.width * 1.3, self.width * 1.3
@@ -596,12 +596,12 @@ FloatLayout:
             padding: dp(6), 0
             canvas.before:
                 Color:
-                    rgba: 0.045, 0.058, 0.13, 1
+                    rgba: 1, 1, 1, 1
                 Rectangle:
                     pos: self.pos
                     size: self.size
                 Color:
-                    rgba: 1, 1, 1, 0.08
+                    rgba: 0.10, 0.60, 0.35, 0.14
                 Rectangle:
                     pos: self.x, self.top
                     size: self.width, dp(1)
@@ -824,26 +824,6 @@ FloatLayout:
                 RoundInput:
                     id: f_domain
                 FieldLabel:
-                    text: "Network you connect from (MCI / Irancell / Rightel / home internet)"
-                RoundSpinner:
-                    id: sp_net
-                    text: "Auto-detect (recommended)"
-                    values: ["Auto-detect (recommended)", "Default (all networks)", "MCI (Hamrah-e-Avval)", "Irancell", "Rightel", "Home internet (ADSL / Fiber)"]
-                Muted:
-                    text: "One subscription then carries separate clean IPs and fragment values for each network, so it connects on mobile and at home."
-                FieldLabel:
-                    text: "Fragment override, length and interval (optional, e.g. 10-30 and 1-2)"
-                BoxLayout:
-                    size_hint_y: None
-                    height: dp(46)
-                    spacing: dp(8)
-                    RoundInput:
-                        id: f_frag_len
-                        hint_text: "length  10-30"
-                    RoundInput:
-                        id: f_frag_int
-                        hint_text: "interval  1-2"
-                FieldLabel:
                     text: "Temporary proxy for the panel (optional)  e.g. 1.2.3.4:8080 or socks5://1.2.3.4:1080"
                 RoundInput:
                     id: f_proxy
@@ -967,14 +947,14 @@ class RoundSpinner(Spinner):
 
 class RoundButton(ButtonBehavior, Label):
     kind = StringProperty("primary")      # primary | soft | danger | ghost
-    bg_color = ListProperty([0.49, 0.36, 0.98, 1])
+    bg_color = ListProperty([0.10, 0.62, 0.36, 1])
     fg = ListProperty([1, 1, 1, 1])
 
     _PALETTE = {
-        "primary": ((0.49, 0.36, 0.98, 1), (1, 1, 1, 1)),
-        "soft": ((0.14, 0.17, 0.33, 1), (0.70, 0.82, 1.0, 1)),
-        "danger": ((0.32, 0.10, 0.15, 1), (1.0, 0.52, 0.56, 1)),
-        "ghost": ((0, 0, 0, 0), (0.60, 0.66, 0.79, 1)),
+        "primary": ((0.10, 0.62, 0.36, 1), (1, 1, 1, 1)),
+        "soft": ((0.87, 0.96, 0.90, 1), (0.05, 0.45, 0.25, 1)),
+        "danger": ((1.0, 0.90, 0.91, 1), (0.78, 0.18, 0.22, 1)),
+        "ghost": ((0, 0, 0, 0), (0.36, 0.50, 0.42, 1)),
     }
 
     def __init__(self, **kw):
@@ -987,7 +967,7 @@ class RoundButton(ButtonBehavior, Label):
     def _recalc(self, *_):
         bg, fg = self._PALETTE.get(self.kind, self._PALETTE["primary"])
         if self.disabled:
-            bg, fg = (0.10, 0.12, 0.22, 1), (0.40, 0.45, 0.58, 1)
+            bg, fg = (0.88, 0.93, 0.90, 1), (0.58, 0.68, 0.62, 1)
         elif self.state == "down":
             bg = (bg[0] * 0.86, bg[1] * 0.86, bg[2] * 0.86, bg[3])
         self.bg_color = list(bg)
@@ -1006,7 +986,7 @@ class SoftBar(Widget):
 class StatBox(BoxLayout):
     value = StringProperty("0")
     caption = StringProperty("")
-    accent = ListProperty([0.13, 0.83, 0.93, 1])
+    accent = ListProperty([0.10, 0.62, 0.36, 1])
 
 
 class IpRow(BoxLayout):
@@ -1031,7 +1011,7 @@ class ToastLabel(Label):
 
 class GradientBox(BoxLayout):
     c1 = ListProperty(C_PRIMARY)
-    c2 = ListProperty(C_CYAN)
+    c2 = ListProperty([0.25, 0.75, 0.48, 1])
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -1091,16 +1071,16 @@ class Radar(FloatLayout):
         c.clear()
         rad = math.radians
         with c:
-            Color(0.043, 0.063, 0.125, 1)
+            Color(0.90, 0.97, 0.93, 1)
             RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(24)])
             cx, cy = self.center
             R = min(self.width, self.height) / 2 - dp(34)
-            Color(0.20, 0.85, 0.70, 0.09)
+            Color(0.20, 0.74, 0.45, 0.12)
             Ellipse(pos=(cx - R, cy - R), size=(2 * R, 2 * R))
-            Color(0.25, 0.90, 0.75, 0.32)
+            Color(0.10, 0.60, 0.35, 0.35)
             for k in (1.0, 0.75, 0.5, 0.25):
                 Line(circle=(cx, cy, R * k), width=dp(0.9))
-            Color(0.25, 0.90, 0.75, 0.16)
+            Color(0.10, 0.60, 0.35, 0.20)
             Line(points=[cx - R, cy, cx + R, cy], width=dp(0.8))
             Line(points=[cx, cy - R, cx, cy + R], width=dp(0.8))
             # sweep with fading trail
@@ -1108,11 +1088,11 @@ class Radar(FloatLayout):
             for i in range(steps):
                 a0 = rad(self._angle + i * span / steps)
                 a1 = rad(self._angle + (i + 1) * span / steps)
-                Color(0.20, 1.0, 0.75, (0.36 if self.active else 0.22) * (1 - i / steps) ** 1.7)
+                Color(0.12, 0.70, 0.40, (0.40 if self.active else 0.24) * (1 - i / steps) ** 1.7)
                 Triangle(points=[cx, cy, cx + R * math.cos(a0), cy + R * math.sin(a0),
                                  cx + R * math.cos(a1), cy + R * math.sin(a1)])
             a = rad(self._angle)
-            Color(0.65, 1.0, 0.92, 0.95)
+            Color(0.07, 0.55, 0.30, 0.95)
             Line(points=[cx, cy, cx + R * math.cos(a), cy + R * math.sin(a)], width=dp(1.6))
             # blips
             oks = [b for b in self._blips if b["ok"]]
@@ -1124,15 +1104,15 @@ class Radar(FloatLayout):
                 if b["ok"]:
                     if id(b) in pulsing:
                         p = (self._t * 1.5 + b["a"] / 360.0) % 1
-                        Color(0.30, 1.0, 0.60, 0.55 * (1 - p))
+                        Color(0.10, 0.65, 0.35, 0.55 * (1 - p))
                         Line(circle=(x, y, dp(4) + dp(15) * p), width=dp(1))
-                    Color(0.45, 1.0, 0.65, 1)
+                    Color(0.07, 0.60, 0.30, 1)
                     Ellipse(pos=(x - dp(3.5), y - dp(3.5)), size=(dp(7), dp(7)))
                 else:
                     fade = max(0.0, 1 - b["age"] / 1.6)
-                    Color(1.0, 0.35, 0.40, 0.55 * fade)
+                    Color(0.85, 0.25, 0.30, 0.55 * fade)
                     Ellipse(pos=(x - dp(2.2), y - dp(2.2)), size=(dp(4.4), dp(4.4)))
-            Color(0.65, 1.0, 0.92, 1)
+            Color(0.07, 0.55, 0.30, 1)
             Ellipse(pos=(cx - dp(3), cy - dp(3)), size=(dp(6), dp(6)))
 
 
@@ -1161,15 +1141,15 @@ class Ring(FloatLayout):
             cx, cy = self.center
             r = min(self.size) / 2 - dp(10)
             w = dp(9)
-            Color(1, 1, 1, 0.08)
+            Color(0.10, 0.60, 0.35, 0.14)
             Line(circle=(cx, cy, r), width=w)
             if self.busy and self.value <= 0.01:
-                Color(0.13, 0.83, 0.93, 0.18)
+                Color(0.12, 0.68, 0.40, 0.20)
                 Line(circle=(cx, cy, r, self._rot, self._rot + 100), width=w * 2.2, cap="round")
                 Color(*C_CYAN)
                 Line(circle=(cx, cy, r, self._rot, self._rot + 100), width=w, cap="round")
             elif self.value > 0.005:
-                Color(0.49, 0.36, 0.98, 0.20)
+                Color(0.12, 0.68, 0.40, 0.20)
                 Line(circle=(cx, cy, r, 0, 360 * min(1.0, self.value)), width=w * 2.2, cap="round")
                 Color(*C_CYAN)
                 Line(circle=(cx, cy, r, 0, 360 * min(1.0, self.value)), width=w, cap="round")
@@ -1748,7 +1728,7 @@ class AminiumApp(App):
             "decoy": "", "tg_token": "", "tg_secret": "", "tg_admins": "", "domain": b.ids.f_domain.text.strip().lower(),
             "d1": True, "verify_ws": True, "scan": self.scan_form(), "ips": list(self.ips), "keep": 100, "tls": tls,
             "proxy": b.ids.f_proxy.text.strip(), "auto_proxy": bool(self.cfg.get("auto_proxy", True)),
-            "net": self.resolve_net(), "frag_len": b.ids.f_frag_len.text.strip(), "frag_int": b.ids.f_frag_int.text.strip(),
+            "net": "", "frag_len": "", "frag_int": "",
         }
         self.cfg["panel_proxy"] = form["proxy"]
         self.save_cfg()
@@ -1837,47 +1817,6 @@ class AminiumApp(App):
             self.log(f"ERROR: save failed: {e}")
 
     # ---------- "Saved" screen ----------
-    # ---------- network profile (MCI / home) ----------
-    NET_LABELS = {
-        "Default (all networks)": "",
-        "MCI (Hamrah-e-Avval)": "mci",
-        "Irancell": "irancell",
-        "Rightel": "rightel",
-        "Home internet (ADSL / Fiber)": "home",
-    }
-
-    def detect_net(self):
-        """Android only: Wi-Fi / ethernet -> home internet; mobile data -> operator from the SIM's MCC-MNC."""
-        if platform != "android":
-            return ""
-        try:
-            from jnius import autoclass  # type: ignore
-            ctx = autoclass("org.kivy.android.PythonActivity").mActivity
-            Context = autoclass("android.content.Context")
-            ni = ctx.getSystemService(Context.CONNECTIVITY_SERVICE).getActiveNetworkInfo()
-            if ni is None:
-                return ""
-            if ni.getType() in (1, 9):          # WIFI, ETHERNET
-                return "home"
-            op = str(ctx.getSystemService(Context.TELEPHONY_SERVICE).getNetworkOperator() or "")
-            for key, p in core.NET_PRESETS.items():
-                if p.get("plmn") and op.startswith(p["plmn"]):
-                    return key
-        except Exception as e:
-            self.log(f"Network detection failed: {e}")
-        return ""
-
-    def resolve_net(self):
-        try:
-            text = self.sm.get_screen("build").ids.sp_net.text
-        except Exception:
-            return ""
-        if text.startswith("Auto"):
-            key = self.detect_net()
-            self.log("Detected network: " + (core.NET_PRESETS[key]["label"] if key else "unknown - using the default list"))
-            return key
-        return self.NET_LABELS.get(text, "")
-
     # ---------- account / proxy toggles ----------
     def on_pick_account(self, text):
         if text in self._acc_values:
@@ -2012,8 +1951,7 @@ class AminiumApp(App):
         rec = items[index]
         content = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(10))
         content.add_widget(Label(text="Each IP is tested against this panel's worker from this network; only working ones are written. "
-                                      "If none works, the panel stays unchanged.\nThe IPs go into the profile of the network chosen in Build "
-                                      "(Auto-detect by default), so be on that network now.", color=C_TEXT, font_size="12sp",
+                                      "If none works, the panel stays unchanged.\nBe on the network you want to use now.", color=C_TEXT, font_size="12sp",
                                  halign="center", valign="middle"))
         b_new = RoundButton(text=f"Use the new Radar IPs ({len(self.ips)})")
         b_old = RoundButton(text=f"Re-test the saved IPs ({len(rec.get('ips', []))})", kind="soft")
@@ -2027,15 +1965,12 @@ class AminiumApp(App):
             pop.dismiss()
             if not pool:
                 return self.toast("No IPs - run the Radar first")
-            net_key = self.resolve_net()
             self.toast("Updating IPs - watch the log bar")
 
             def work():
                 try:
-                    bb = self.sm.get_screen("build").ids
                     new = core.update_deployment_ips(dict(rec), pool, self.scan_form(), self.log,
-                                                     stage=lambda t, f: self.log(t), net=net_key,
-                                                     frag=core.valid_frag(bb.f_frag_len.text.strip(), bb.f_frag_int.text.strip()))
+                                                     stage=lambda t, f: self.log(t))
                     core.replace_deployment(index, new)
                     self.log(f"Done: {len(new['ips'])} working IPs now in the panel.")
                     self.toast(f"{len(new['ips'])} IPs updated")
