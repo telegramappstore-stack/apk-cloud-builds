@@ -1558,7 +1558,7 @@ def panel_apply_profile(base: str, panel: str, password: str, key: str, ips: lis
         pr["asns"] = [a for a in (pr.get("asns") or []) if a not in p["asns"]]
         if pr["asns"]:
             out.append(pr)
-    out.append({"name": p["name"], "asns": list(p["asns"]), "cleanAddrs": [host_of(base)] + list(ips), "ports": [],
+    out.append({"name": p["name"], "asns": list(p["asns"]), "cleanAddrs": list(ips), "ports": [],
                 "fragment": frag or p["fragment"]})
     r = s.post(api + "/settings", json={"ispProfiles": out}, timeout=30)
     if r.status_code != 200:
@@ -1848,11 +1848,11 @@ def run_build(token: str, email: str, accounts: list, account_id: str,
             f"your worker's own address ({host}), exactly like the plain deployer. If those do not connect either, this "
             "network blocks that domain: deploy to Workers instead of Pages, or attach your own domain (Advanced > Custom domain).")
         stage("No clean IP works with this worker here - configs use its own address.", 0.75)
-    addrs = [host] + good
+    addrs = good if good else [host]   # only the found IPs; the Pages/Workers address is used only if no IP works
     stage("Writing the address list and settings into the panel...", 0.84)
     extra = dict(PANEL_STYLE)
     extra.update(tls=f["tls"], fingerprint="chrome")
-    panel_apply_clean(base, panel_path, f["pass"], addrs, log, extra=extra)
+    panel_apply_clean(base, panel_path, f["pass"], addrs, log, keep_domains=False, extra=extra)
     ips = good
     net = f.get("net")
     if net in NET_PRESETS and ips:
@@ -1990,7 +1990,7 @@ def update_deployment_ips(rec: dict, pool: list, scan_form: dict, log, stage=lam
     stage("Writing the new IPs into the panel...", 0.8)
     extra = dict(PANEL_STYLE)
     extra.update(tls=tls, fingerprint=rec.get("fp", "chrome"))
-    panel_apply_clean(base, panel_path, password, [host] + good, log, extra=extra)
+    panel_apply_clean(base, panel_path, password, good, log, keep_domains=False, extra=extra)
     if net in NET_PRESETS:
         panel_apply_profile(base, panel_path, password, net, good, log, frag=frag)
         rec["net"] = net
