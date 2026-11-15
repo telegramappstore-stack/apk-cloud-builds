@@ -510,6 +510,18 @@ FloatLayout:
         Page:
             Card:
                 H1:
+                    text: "New to Cloudflare?"
+                Body:
+                    text: "Aminium runs on your own free Cloudflare account. If you do not have one yet, sign up first (free plan is enough)."
+                RoundButton:
+                    text: "Create a free Cloudflare account"
+                    height: dp(52)
+                    on_release: app.open_signup_page()
+                Muted:
+                    text: "1. Enter email + password and sign up\n2. Open the verification email and confirm it\n3. Come back here and continue below. Already have an account? Skip this card."
+
+            Card:
+                H1:
                     text: "Connect Cloudflare"
                 Body:
                     text: "One tap opens Cloudflare's token page with every permission Aminium needs already ticked. Press Continue, then Create Token, copy it and come back."
@@ -676,7 +688,7 @@ FloatLayout:
                     text: "Workers (recommended)"
                     values: ["Workers (recommended)", "Pages (pages.dev)"]
                 FieldLabel:
-                    text: "Source zip (aminium-pages.zip)"
+                    text: "Panel source (built into the app, or pick a zip)"
                 BoxLayout:
                     size_hint_y: None
                     height: dp(46)
@@ -1029,14 +1041,15 @@ class Splash(FloatLayout):
         self._tex = gradient_texture(C_PRIMARY, C_CYAN, vertical=True)
         self._logo = Label(text="A", bold=True, font_size="46sp", size_hint=(None, None),
                            size=(dp(96), dp(96)), pos_hint={"center_x": .5, "center_y": .58})
-        self._name = Label(text="AMINIUM STUDIO", bold=True, font_size="24sp", size_hint=(None, None),
-                           size=(dp(300), dp(40)), pos_hint={"center_x": .5, "center_y": .43})
-        self._tag = Label(text="Clean IPs. One tap panels.", font_size="13sp", color=(1, 1, 1, .85),
-                          size_hint=(None, None), size=(dp(300), dp(30)), pos_hint={"center_x": .5, "center_y": .385})
+        self._word = "Aminium"
+        self._name = Label(text="", bold=True, font_size="40sp", size_hint=(None, None),
+                           size=(dp(320), dp(56)), pos_hint={"center_x": .5, "center_y": .43})
+        self._tag = Label(text="Telegram id : illuyj", font_size="15sp", color=(1, 1, 1, 1), opacity=0,
+                          size_hint=(None, None), size=(dp(320), dp(30)), pos_hint={"center_x": .5, "center_y": .37})
         for w in (self._logo, self._name, self._tag):
             self.add_widget(w)
         self._ev = Clock.schedule_interval(self._tick, 1 / 30.0)
-        Clock.schedule_once(self.dismiss, 2.3)
+        Clock.schedule_once(self.dismiss, 3.2)
 
     def on_touch_down(self, touch):
         return True
@@ -1049,6 +1062,13 @@ class Splash(FloatLayout):
 
     def _tick(self, dt):
         self._t += dt
+        # logo pops in, the name is typed letter by letter, then the Telegram line fades in
+        pop = min(1.0, self._t / 0.5)
+        self._logo.opacity = pop
+        self._logo.font_size = f"{int(30 + 16 * (1 - (1 - pop) ** 3))}sp"
+        n = max(0, min(len(self._word), int((self._t - 0.5) / 0.14)))
+        self._name.text = self._word[:n]
+        self._tag.opacity = max(0.0, min(1.0, (self._t - 1.5) / 0.7))
         c = self.canvas.before
         c.clear()
         with c:
@@ -1066,7 +1086,7 @@ class Splash(FloatLayout):
             Color(1, 1, 1, 0.28)
             RoundedRectangle(pos=(bx, by), size=(bw, dp(5)), radius=[dp(3)])
             Color(1, 1, 1, 0.95)
-            RoundedRectangle(pos=(bx, by), size=(max(dp(5), bw * min(1.0, self._t / 2.1)), dp(5)), radius=[dp(3)])
+            RoundedRectangle(pos=(bx, by), size=(max(dp(5), bw * min(1.0, self._t / 3.0)), dp(5)), radius=[dp(3)])
 
     def dismiss(self, *_):
         a = Animation(opacity=0, duration=0.5)
@@ -1238,7 +1258,11 @@ class AminiumApp(App):
         if name == "build":
             self.refresh_build_summary()
 
+    BUILTIN_LABEL = "Built-in panel"
+
     def find_default_zip(self):
+        if core.builtin_available():
+            return self.BUILTIN_LABEL
         dirs = [core.APP_DIR, Path(core.__file__).resolve().parent, Path(__file__).resolve().parent, Path.cwd()]
         for d in dirs:
             p = d / "aminium-pages.zip"
@@ -1260,6 +1284,11 @@ class AminiumApp(App):
         if self.open_url(url):
             self.toast("Opening Cloudflare...")
             self.log("Cloudflare token page opened. Press Continue -> Create Token, then copy the token.")
+
+    def open_signup_page(self):
+        if self.open_url("https://dash.cloudflare.com/sign-up"):
+            self.toast("Opening Cloudflare sign-up...")
+            self.log("Sign up, confirm the email Cloudflare sends you, then come back and press 'Create API token'.")
 
     def paste_token(self):
         from kivy.core.clipboard import Clipboard
@@ -1439,15 +1468,67 @@ class AminiumApp(App):
             b.ids.f_source.text = self.find_default_zip()
 
     def pick_source_file(self):
-        found = self.find_default_zip()
         b = self.sm.get_screen("build")
-        if found and not b.ids.f_source.text:
-            b.ids.f_source.text = found
-            return self.toast("Found aminium-pages.zip")
+        if core.builtin_available() and b.ids.f_source.text != self.BUILTIN_LABEL:
+            b.ids.f_source.text = self.BUILTIN_LABEL
+            return self.toast("Using the panel built into the app")
+        if platform == "android":
+            return self.pick_with_android_picker()
+        self.pick_with_kivy_chooser()
+
+    def pick_with_android_picker(self):
+        """Android's own file picker (works on every Android version, no storage permission needed).
+        The chosen file is copied into the app's private folder, so it is found automatically next time."""
+        try:
+            from android import activity  # type: ignore
+            from jnius import autoclass  # type: ignore
+            Intent = autoclass("android.content.Intent")
+            Activity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.setType("*/*")
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            activity.bind(on_activity_result=self._on_picked)
+            Activity.mActivity.startActivityForResult(Intent.createChooser(intent, "Choose aminium-pages.zip"), 4242)
+        except Exception as e:
+            self.log(f"ERROR: Android file picker failed: {e}")
+
+    def _on_picked(self, request_code, result_code, intent):
+        if request_code != 4242:
+            return
+        try:
+            from android import activity  # type: ignore
+            activity.unbind(on_activity_result=self._on_picked)
+        except Exception:
+            pass
+        if result_code != -1 or intent is None:      # -1 == RESULT_OK
+            return
+        try:
+            from jnius import autoclass  # type: ignore
+            Activity = autoclass("org.kivy.android.PythonActivity")
+            uri = intent.getData()
+            pfd = Activity.mActivity.getContentResolver().openFileDescriptor(uri, "r")
+            fd = pfd.detachFd()
+            with os.fdopen(fd, "rb") as f:
+                data = f.read()
+            core.APP_DIR.mkdir(parents=True, exist_ok=True)
+            dest = core.APP_DIR / "aminium-pages.zip"
+            dest.write_bytes(data)
+            core.load_source(str(dest))               # validates: must contain _worker.js
+        except Exception as e:
+            return self.log(f"ERROR: that file cannot be used: {e}")
+
+        def ui(*_):
+            self.sm.get_screen("build").ids.f_source.text = str(dest)
+            self.toast("Panel zip loaded")
+            self.log(f"Panel zip copied to {dest}")
+        Clock.schedule_once(ui, 0)
+
+    def pick_with_kivy_chooser(self):
+        b = self.sm.get_screen("build")
         try:
             from kivy.uix.filechooser import FileChooserListView
-            start = next((p for p in ("/storage/emulated/0/Download", "/sdcard/Download", str(core.APP_DIR),
-                                      os.path.expanduser("~")) if os.path.isdir(p)), "/")
+            start = next((p for p in (str(core.APP_DIR), os.path.expanduser("~/Downloads"), os.path.expanduser("~"))
+                          if os.path.isdir(p)), "/")
             box = BoxLayout(orientation="vertical", spacing=dp(8), padding=dp(6))
             fc = FileChooserListView(path=start, filters=["*.zip"])
             box.add_widget(fc)
@@ -1467,7 +1548,7 @@ class AminiumApp(App):
             cancel.bind(on_release=lambda *_: pop.dismiss())
             pop.open()
         except Exception as e:
-            self.log(f"File picker unavailable ({e}). Bundle aminium-pages.zip next to main.py when building the APK.")
+            self.log(f"ERROR: file chooser unavailable: {e}")
 
     def refresh_build_summary(self):
         b = self.sm.get_screen("build")
@@ -1487,8 +1568,12 @@ class AminiumApp(App):
             return self.log("ERROR: no clean IPs yet - run the Radar scan first.")
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,56}", project or ""):
             return self.log("ERROR: project name: lowercase letters, digits and '-' only.")
-        if not source or not Path(source).exists():
-            return self.log("ERROR: source zip not found - tap Pick, or bundle aminium-pages.zip in the APK.")
+        if source in ("", self.BUILTIN_LABEL, core.BUILTIN):
+            if not core.builtin_available():
+                return self.log("ERROR: no panel inside the app - tap Pick and choose aminium-pages.zip.")
+            source = core.BUILTIN
+        elif not Path(source).exists():
+            return self.log("ERROR: source zip not found - tap Pick and choose aminium-pages.zip again.")
         if not b.ids.f_pass.text:
             return self.log("ERROR: ADMIN_PASSWORD is empty.")
         panel = b.ids.f_panel.text.strip()
