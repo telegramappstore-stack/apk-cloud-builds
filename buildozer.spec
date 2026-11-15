@@ -11,7 +11,7 @@ source.include_patterns = aminium-pages.zip
 
 version = 1.0.0
 
-requirements = python3,kivy==2.3.0,requests,qrcode,certifi,pillow,pyjnius,urllib3,idna,charset-normalizer
+requirements = python3,kivy==2.3.0,requests,pysocks,qrcode,certifi,pillow,pyjnius,urllib3,idna,charset-normalizer
 
 orientation = portrait
 fullscreen = 0
