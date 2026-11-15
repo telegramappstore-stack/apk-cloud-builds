@@ -1488,7 +1488,8 @@ class AminiumApp(App):
             intent.setType("*/*")
             intent.addCategory(Intent.CATEGORY_OPENABLE)
             activity.bind(on_activity_result=self._on_picked)
-            Activity.mActivity.startActivityForResult(Intent.createChooser(intent, "Choose aminium-pages.zip"), 4242)
+            # no Intent.createChooser(): pyjnius cannot match a Python str to its CharSequence argument
+            Activity.mActivity.startActivityForResult(intent, 4242)
         except Exception as e:
             self.log(f"ERROR: Android file picker failed: {e}")
 
