@@ -660,6 +660,11 @@ class CFError(Exception):
     pass
 
 
+# Extra panel settings written together with the clean IPs (the panel's own defaults already cover
+# protocols / fragment / alpn, so nothing extra is needed here; tls + fingerprint are added in run_build).
+PANEL_STYLE: dict = {}
+
+
 # ---- temporary proxy for talking to the freshly deployed panel (pages.dev / workers.dev are filtered) ----
 PANEL_PROXY = ""   # "" = direct. Set with set_panel_proxy("host:port" | "http://..." | "socks5://...")
 
